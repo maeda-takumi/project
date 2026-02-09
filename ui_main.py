@@ -7,13 +7,21 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
     QLineEdit, QCheckBox, QPushButton,
     QComboBox, QSpinBox, QMessageBox, QLabel,
-    QStackedWidget, QFrame, QToolButton, QDateTimeEdit
+    QStackedWidget, QFrame, QToolButton, QDateTimeEdit, QTableWidget,
+    QAbstractItemView
 )
 
 from style import APP_QSS
 
 
 class MainWindow(QMainWindow):
+    ORDER_COL_SYMBOL = 0
+    ORDER_COL_PRODUCT = 1
+    ORDER_COL_SIDE = 2
+    ORDER_COL_ENTRY_TYPE = 3
+    ORDER_COL_LIMIT_PRICE = 4
+    ORDER_COL_SL_DIFF = 5
+    ORDER_COL_TP_DIFF = 6
     # ロジック側が拾うためのシグナル
     request_save_api = Signal()
     request_load_api = Signal()
@@ -159,63 +167,45 @@ class MainWindow(QMainWindow):
         g = QGroupBox("注文設定")
         v = QVBoxLayout(g)
 
-        form = QVBoxLayout()
-        form.setSpacing(10)
+        self.orders_table = QTableWidget(0, 7)
+        self.orders_table.setHorizontalHeaderLabels([
+            "銘柄コード", "信用/現物", "売買", "成行/指値", "指値価格", "損切差額", "利確差額"
+        ])
+        self.orders_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.orders_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.orders_table.horizontalHeader().setStretchLastSection(True)
+        self.orders_table.verticalHeader().setVisible(False)
+        self.orders_table.setShowGrid(True)
+        self.orders_table.setAlternatingRowColors(True)
+        v.addWidget(self.orders_table)
 
-        self.order_symbol = QLineEdit()
-        form.addWidget(self._build_form_row("銘柄コード", self.order_symbol))
+        row_tools = QHBoxLayout()
+        self.btn_add_row = QPushButton("行追加")
+        self.btn_remove_row = QPushButton("選択行削除")
+        row_tools.addWidget(self.btn_add_row)
+        row_tools.addWidget(self.btn_remove_row)
+        row_tools.addStretch(1)
+        v.addLayout(row_tools)
 
-        self.order_product = QComboBox()
-        self.order_product.addItem("現物", "cash")
-        self.order_product.addItem("信用", "margin")
-        form.addWidget(self._build_form_row("信用/現物", self.order_product))
-
-        self.order_side = QComboBox()
-        self.order_side.addItem("買", "buy")
-        self.order_side.addItem("売", "sell")
-        form.addWidget(self._build_form_row("売買", self.order_side))
-
-        self.order_entry_type = QComboBox()
-        self.order_entry_type.addItem("成行", "market")
-        self.order_entry_type.addItem("指値", "limit")
-        form.addWidget(self._build_form_row("成行/指値", self.order_entry_type))
-
-        self.order_limit_price = QSpinBox()
-        self.order_limit_price.setRange(1, 1_000_000_000)
-        self.order_limit_price.setValue(1)
-        self.order_limit_price.setSuffix(" 円")
-        self.limit_price_row = self._build_form_row("指値価格", self.order_limit_price)
-        form.addWidget(self.limit_price_row)
-
-        self.order_sl_diff = QSpinBox()
-        self.order_sl_diff.setRange(1, 1_000_000_000)
-        self.order_sl_diff.setValue(1)
-        self.order_sl_diff.setSuffix(" 円")
-        form.addWidget(self._build_form_row("損切差額", self.order_sl_diff))
-
-        self.order_tp_diff = QSpinBox()
-        self.order_tp_diff.setRange(1, 1_000_000_000)
-        self.order_tp_diff.setValue(1)
-        self.order_tp_diff.setSuffix(" 円")
-        form.addWidget(self._build_form_row("利確差額", self.order_tp_diff))
+        run_row = QHBoxLayout()
 
         self.order_run_mode = QComboBox()
         self.order_run_mode.addItem("即時実行", "immediate")
         self.order_run_mode.addItem("予約実行", "scheduled")
-        form.addWidget(self._build_form_row("実行方式", self.order_run_mode))
+        run_row.addWidget(self._build_form_row("実行方式", self.order_run_mode))
 
         self.order_scheduled_at = QDateTimeEdit()
         self.order_scheduled_at.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self.order_scheduled_at.setDateTime(QDateTime.currentDateTime())
         self.order_scheduled_at.setCalendarPopup(True)
         self.schedule_row = self._build_form_row("実行日時", self.order_scheduled_at)
-        form.addWidget(self.schedule_row)
+        run_row.addWidget(self.schedule_row)
+        run_row.addStretch(1)
+        v.addLayout(run_row)
 
-        hint = QLabel("損切/利確は差額入力（符号は内部で自動付与）")
+        hint = QLabel("行追加で複数注文に対応。損切/利確は差額入力（符号は内部で自動付与）")
         hint.setObjectName("muted")
-        form.addWidget(hint)
-
-        v.addLayout(form)
+        v.addWidget(hint)
 
         self.order_error_label = QLabel("")
         self.order_error_label.setObjectName("error")
@@ -233,6 +223,7 @@ class MainWindow(QMainWindow):
         tool.addWidget(self.btn_submit)
         v.addLayout(tool)
 
+        self._add_order_row()
         self._update_order_field_visibility()
         self._validate_order_form()
         return g
@@ -244,16 +235,11 @@ class MainWindow(QMainWindow):
         self.btn_clear.clicked.connect(self.request_clear_orders.emit)
         self.btn_submit.clicked.connect(self.request_submit_orders.emit)
 
-        self.order_entry_type.currentIndexChanged.connect(self._handle_entry_type_change)
         self.order_run_mode.currentIndexChanged.connect(self._handle_run_mode_change)
 
-        self.order_symbol.textChanged.connect(self._validate_order_form)
-        self.order_product.currentIndexChanged.connect(self._validate_order_form)
-        self.order_side.currentIndexChanged.connect(self._validate_order_form)
-        self.order_entry_type.currentIndexChanged.connect(self._validate_order_form)
-        self.order_limit_price.valueChanged.connect(self._validate_order_form)
-        self.order_sl_diff.valueChanged.connect(self._validate_order_form)
-        self.order_tp_diff.valueChanged.connect(self._validate_order_form)
+        self.btn_add_row.clicked.connect(self._add_order_row)
+        self.btn_remove_row.clicked.connect(self._remove_selected_rows)
+
         self.order_run_mode.currentIndexChanged.connect(self._validate_order_form)
         self.order_scheduled_at.dateTimeChanged.connect(self._validate_order_form)
 
@@ -269,79 +255,187 @@ class MainWindow(QMainWindow):
         return row
 
     def _update_order_field_visibility(self):
-        is_limit = self.order_entry_type.currentData() == "limit"
-        self.limit_price_row.setVisible(is_limit)
-
         is_scheduled = self.order_run_mode.currentData() == "scheduled"
         self.schedule_row.setVisible(is_scheduled)
 
     def _handle_entry_type_change(self):
-        self._update_order_field_visibility()
+        sender = self.sender()
+        row = self._find_row_for_widget(sender)
+        if row < 0:
+            return
+        self._set_row_limit_state(row)
         self._validate_order_form()
 
+    def _get_row_entry_type(self, row: int) -> str:
+        widget = self._get_row_widget(row, self.ORDER_COL_ENTRY_TYPE)
+        if isinstance(widget, QComboBox):
+            return widget.currentData()
+        return "market"
+
+    def _get_row_widget(self, row: int, col: int) -> QWidget | None:
+        return self.orders_table.cellWidget(row, col)
+
+    def _find_row_for_widget(self, widget: QWidget | None) -> int:
+        if widget is None:
+            return -1
+        for row in range(self.orders_table.rowCount()):
+            for col in range(self.orders_table.columnCount()):
+                if self.orders_table.cellWidget(row, col) is widget:
+                    return row
+        return -1
     def _handle_run_mode_change(self):
         self._update_order_field_visibility()
         self._validate_order_form()
 
+    def _add_order_row(self):
+        row = self.orders_table.rowCount()
+        self.orders_table.insertRow(row)
+
+        symbol = QLineEdit()
+        symbol.textChanged.connect(self._validate_order_form)
+        self.orders_table.setCellWidget(row, self.ORDER_COL_SYMBOL, symbol)
+
+        product = QComboBox()
+        product.addItem("現物", "cash")
+        product.addItem("信用", "margin")
+        product.currentIndexChanged.connect(self._validate_order_form)
+        self.orders_table.setCellWidget(row, self.ORDER_COL_PRODUCT, product)
+
+        side = QComboBox()
+        side.addItem("買", "buy")
+        side.addItem("売", "sell")
+        side.currentIndexChanged.connect(self._validate_order_form)
+        self.orders_table.setCellWidget(row, self.ORDER_COL_SIDE, side)
+
+        entry_type = QComboBox()
+        entry_type.addItem("成行", "market")
+        entry_type.addItem("指値", "limit")
+        entry_type.currentIndexChanged.connect(self._handle_entry_type_change)
+        self.orders_table.setCellWidget(row, self.ORDER_COL_ENTRY_TYPE, entry_type)
+
+        limit_price = QSpinBox()
+        limit_price.setRange(1, 1_000_000_000)
+        limit_price.setValue(1)
+        limit_price.setSuffix(" 円")
+        limit_price.valueChanged.connect(self._validate_order_form)
+        limit_price.setEnabled(False)
+        self.orders_table.setCellWidget(row, self.ORDER_COL_LIMIT_PRICE, limit_price)
+
+        sl_diff = QSpinBox()
+        sl_diff.setRange(1, 1_000_000_000)
+        sl_diff.setValue(1)
+        sl_diff.setSuffix(" 円")
+        sl_diff.valueChanged.connect(self._validate_order_form)
+        self.orders_table.setCellWidget(row, self.ORDER_COL_SL_DIFF, sl_diff)
+
+        tp_diff = QSpinBox()
+        tp_diff.setRange(1, 1_000_000_000)
+        tp_diff.setValue(1)
+        tp_diff.setSuffix(" 円")
+        tp_diff.valueChanged.connect(self._validate_order_form)
+        self.orders_table.setCellWidget(row, self.ORDER_COL_TP_DIFF, tp_diff)
+
+        self._set_row_limit_state(row)
+        self._validate_order_form()
+
+    def _remove_selected_rows(self):
+        selected = sorted({idx.row() for idx in self.orders_table.selectionModel().selectedRows()}, reverse=True)
+        for row in selected:
+            self.orders_table.removeRow(row)
+        if self.orders_table.rowCount() == 0:
+            self._add_order_row()
+        self._validate_order_form()
+
+    def _set_row_limit_state(self, row: int):
+        entry_type = self._get_row_entry_type(row)
+        limit_widget = self._get_row_widget(row, self.ORDER_COL_LIMIT_PRICE)
+        if isinstance(limit_widget, QSpinBox):
+            limit_widget.setEnabled(entry_type == "limit")
+
     def clear_orders(self):
-        self.order_symbol.clear()
-        self.order_product.setCurrentIndex(0)
-        self.order_side.setCurrentIndex(0)
-        self.order_entry_type.setCurrentIndex(0)
-        self.order_limit_price.setValue(1)
-        self.order_sl_diff.setValue(1)
-        self.order_tp_diff.setValue(1)
+        self.orders_table.setRowCount(0)
+        self._add_order_row()
         self.order_run_mode.setCurrentIndex(0)
         self.order_scheduled_at.setDateTime(QDateTime.currentDateTime())
         self._update_order_field_visibility()
         self._validate_order_form()
 
     def get_orders_payload(self):
-        symbol = self.order_symbol.text().strip()
-        if not symbol:
-            return []
+        orders = []
+        for row in range(self.orders_table.rowCount()):
+            symbol_widget = self._get_row_widget(row, self.ORDER_COL_SYMBOL)
+            symbol = symbol_widget.text().strip() if isinstance(symbol_widget, QLineEdit) else ""
+            if not symbol:
+                continue
 
-        entry_type = self.order_entry_type.currentData()
-        side = self.order_side.currentData()
-        tp_diff = int(self.order_tp_diff.value())
-        sl_diff = int(self.order_sl_diff.value())
+            product_widget = self._get_row_widget(row, self.ORDER_COL_PRODUCT)
+            side_widget = self._get_row_widget(row, self.ORDER_COL_SIDE)
+            entry_widget = self._get_row_widget(row, self.ORDER_COL_ENTRY_TYPE)
+            limit_widget = self._get_row_widget(row, self.ORDER_COL_LIMIT_PRICE)
+            sl_widget = self._get_row_widget(row, self.ORDER_COL_SL_DIFF)
+            tp_widget = self._get_row_widget(row, self.ORDER_COL_TP_DIFF)
 
-        if side == "buy":
-            tp_signed = tp_diff
-            sl_signed = -sl_diff
-        else:
-            tp_signed = -tp_diff
-            sl_signed = sl_diff
+            entry_type = entry_widget.currentData() if isinstance(entry_widget, QComboBox) else "market"
+            side = side_widget.currentData() if isinstance(side_widget, QComboBox) else "buy"
+            tp_diff = int(tp_widget.value()) if isinstance(tp_widget, QSpinBox) else 1
+            sl_diff = int(sl_widget.value()) if isinstance(sl_widget, QSpinBox) else 1
 
-        return [{
-            "symbol": symbol,
-            "exchange": 9,
-            "product": self.order_product.currentData(),
-            "side": side,
-            "qty": 100,
-            "entry_type": entry_type,
-            "entry_price": int(self.order_limit_price.value()) if entry_type == "limit" else None,
-            "tp_price": float(tp_signed),
-            "sl_trigger_price": float(sl_signed),
-            "batch_name": "手動バッチ",
-            "memo": "",
-            "run_mode": self.order_run_mode.currentData(),
-            "scheduled_at": self.order_scheduled_at.dateTime().toString("yyyy-MM-dd HH:mm:ss"),
-        }]
+            if side == "buy":
+                tp_signed = tp_diff
+                sl_signed = -sl_diff
+            else:
+                tp_signed = -tp_diff
+                sl_signed = sl_diff
+
+            entry_price = None
+            if entry_type == "limit" and isinstance(limit_widget, QSpinBox):
+                entry_price = int(limit_widget.value())
+
+            orders.append({
+                "symbol": symbol,
+                "exchange": 9,
+                "product": product_widget.currentData() if isinstance(product_widget, QComboBox) else "cash",
+                "side": side,
+                "qty": 100,
+                "entry_type": entry_type,
+                "entry_price": entry_price,
+                "tp_price": float(tp_signed),
+                "sl_trigger_price": float(sl_signed),
+                "batch_name": "手動バッチ",
+                "memo": "",
+                "run_mode": self.order_run_mode.currentData(),
+                "scheduled_at": self.order_scheduled_at.dateTime().toString("yyyy-MM-dd HH:mm:ss"),
+            })
+
+        return orders
 
     def get_order_validation_errors(self) -> list[str]:
         errors = []
-        if not self.order_symbol.text().strip():
-            errors.append("銘柄コードを入力してください。")
+        if self.orders_table.rowCount() == 0:
+            errors.append("注文行を追加してください。")
+            return errors
 
-        if self.order_entry_type.currentData() == "limit":
-            if self.order_limit_price.value() < 1:
-                errors.append("指値価格は1円以上で指定してください。")
+        for row in range(self.orders_table.rowCount()):
+            symbol_widget = self._get_row_widget(row, self.ORDER_COL_SYMBOL)
+            symbol = symbol_widget.text().strip() if isinstance(symbol_widget, QLineEdit) else ""
+            if not symbol:
+                errors.append(f"{row + 1}行目: 銘柄コードを入力してください。")
+                continue
 
-        if self.order_sl_diff.value() < 1:
-            errors.append("損切差額は1円以上で指定してください。")
-        if self.order_tp_diff.value() < 1:
-            errors.append("利確差額は1円以上で指定してください。")
+            entry_widget = self._get_row_widget(row, self.ORDER_COL_ENTRY_TYPE)
+            entry_type = entry_widget.currentData() if isinstance(entry_widget, QComboBox) else "market"
+            limit_widget = self._get_row_widget(row, self.ORDER_COL_LIMIT_PRICE)
+            if entry_type == "limit" and isinstance(limit_widget, QSpinBox):
+                if limit_widget.value() < 1:
+                    errors.append(f"{row + 1}行目: 指値価格は1円以上で指定してください。")
+
+            sl_widget = self._get_row_widget(row, self.ORDER_COL_SL_DIFF)
+            if isinstance(sl_widget, QSpinBox) and sl_widget.value() < 1:
+                errors.append(f"{row + 1}行目: 損切差額は1円以上で指定してください。")
+
+            tp_widget = self._get_row_widget(row, self.ORDER_COL_TP_DIFF)
+            if isinstance(tp_widget, QSpinBox) and tp_widget.value() < 1:
+                errors.append(f"{row + 1}行目: 利確差額は1円以上で指定してください。")
 
         return errors
 
