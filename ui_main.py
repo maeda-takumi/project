@@ -263,8 +263,10 @@ class MainWindow(QMainWindow):
 
         add_label("銘柄コード", stretch=1)
         add_label("銘柄名", width=200)
+        add_label("現在値", width=120)
         add_label("信用/現物", width=90)
         add_label("売買", width=70)
+        add_label("数量", width=90)
         add_label("成行/指値", width=90)
         add_label("指値価格", width=110)
         add_label("損切差額", width=110)
@@ -296,6 +298,12 @@ class MainWindow(QMainWindow):
         row.symbol_name_label.setFixedWidth(200)
         layout.addWidget(row.symbol_name_label)
 
+        row.current_price_label = QLineEdit()
+        row.current_price_label.setReadOnly(True)
+        row.current_price_label.setPlaceholderText("現在値")
+        row.current_price_label.setFixedWidth(120)
+        layout.addWidget(row.current_price_label)
+
         row.product_input = QComboBox()
         row.product_input.addItem("現物", "cash")
         row.product_input.addItem("信用", "margin")
@@ -309,6 +317,13 @@ class MainWindow(QMainWindow):
         row.side_input.currentIndexChanged.connect(self._validate_order_form)
         row.side_input.setFixedWidth(70)
         layout.addWidget(row.side_input)
+
+        row.qty_input = QSpinBox()
+        row.qty_input.setRange(1, 1_000_000)
+        row.qty_input.setValue(100)
+        row.qty_input.valueChanged.connect(self._validate_order_form)
+        row.qty_input.setFixedWidth(90)
+        layout.addWidget(row.qty_input)
 
         row.entry_type_input = QComboBox()
         row.entry_type_input.addItem("成行", "market")
@@ -369,13 +384,19 @@ class MainWindow(QMainWindow):
         symbol = row_widget.symbol_input.text().strip()
         if not symbol:
             self.set_symbol_name(row_widget, "")
+            self.set_symbol_price(row_widget, "")
             return
         self.set_symbol_name(row_widget, "取得中...")
+        self.set_symbol_price(row_widget, "取得中...")
         self.request_symbol_lookup.emit(symbol, row_widget)
 
     def set_symbol_name(self, row_widget: QWidget, name: str):
         if getattr(row_widget, "symbol_name_label", None) is not None:
             row_widget.symbol_name_label.setText(name)
+
+    def set_symbol_price(self, row_widget: QWidget, price_text: str):
+        if getattr(row_widget, "current_price_label", None) is not None:
+            row_widget.current_price_label.setText(price_text)
 
     def _add_order_row(self):
         row_widget = self._build_order_row_widget()
@@ -442,7 +463,7 @@ class MainWindow(QMainWindow):
                 "exchange": 9,
                 "product": row_widget.product_input.currentData(),
                 "side": side,
-                "qty": 100,
+                "qty": int(row_widget.qty_input.value()),
                 "entry_type": entry_type,
                 "entry_price": entry_price,
                 "tp_price": float(tp_signed),
@@ -477,6 +498,8 @@ class MainWindow(QMainWindow):
             if row_widget.tp_diff_input.value() < 1:
                 errors.append(f"{index + 1}行目: 利確差額は1円以上で指定してください。")
 
+            if row_widget.qty_input.value() < 1:
+                errors.append(f"{index + 1}行目: 数量は1以上で指定してください。")
         return errors
 
     def _validate_order_form(self):
@@ -497,6 +520,7 @@ class MainWindow(QMainWindow):
         for row_widget in self._iter_order_row_widgets():
             if getattr(row_widget, "symbol_input", None) is sender:
                 self.set_symbol_name(row_widget, "")
+                self.set_symbol_price(row_widget, "")
                 break
     def toast(self, title: str, message: str, error: bool = False):
         self.status_label.setText(message)

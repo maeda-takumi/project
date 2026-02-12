@@ -293,12 +293,14 @@ class AppLogic(QObject):
         api = self._get_active_api_account()
         if not api:
             w.set_symbol_name(row_widget, "API未設定")
+            w.set_symbol_price(row_widget, "-")
             w.status_label.setText("API設定が未登録のため銘柄名を取得できません。")
             return
 
         token = self._get_api_token(api)
         if not token:
             w.set_symbol_name(row_widget, "取得失敗")
+            w.set_symbol_price(row_widget, "-")
             w.status_label.setText(self._build_last_token_error_message("APIトークン取得に失敗しました。"))
             return
 
@@ -341,28 +343,48 @@ class AppLogic(QObject):
                         data, used_exchange, used_url = request_symbol_with_token(token)
                     except Exception as retry_error:
                         w.set_symbol_name(row_widget, "取得失敗")
+                        w.set_symbol_price(row_widget, "-")
                         w.status_label.setText(self._build_api_error_message("銘柄名の取得に失敗しました。", retry_error))
                         return
                 else:
                     w.set_symbol_name(row_widget, "取得失敗")
+                    w.set_symbol_price(row_widget, "-")
                     w.status_label.setText("APIトークン再取得に失敗しました。")
                     return
             else:
                 w.set_symbol_name(row_widget, "取得失敗")
+                w.set_symbol_price(row_widget, "-")
                 w.status_label.setText(self._build_api_error_message("銘柄名の取得に失敗しました。", e))
                 return
         except Exception as e:
             w.set_symbol_name(row_widget, "取得失敗")
+            w.set_symbol_price(row_widget, "-")
             w.status_label.setText(self._build_api_error_message("銘柄名の取得に失敗しました。", e))
             return
 
         symbol_name = data.get("SymbolName") or data.get("DisplayName") or ""
         if not symbol_name:
             w.set_symbol_name(row_widget, "未取得")
+            w.set_symbol_price(row_widget, "-")
             w.status_label.setText("銘柄名が見つかりませんでした。")
             return
+        board_price_text = "-"
+        try:
+            board_data = self._request_json(
+                "GET",
+                f"{base_url}/board/{symbol}@{used_exchange}",
+                headers={"X-API-KEY": token},
+            )
+            current_price = board_data.get("CurrentPrice")
+            if current_price is not None:
+                board_price_text = f"{current_price} 円"
+        except Exception:
+            board_price_text = "取得失敗"
         w.set_symbol_name(row_widget, symbol_name)
-        w.status_label.setText(f"銘柄名を取得しました: {symbol_name} (Exchange={used_exchange}, URL={used_url})")     
+        w.set_symbol_price(row_widget, board_price_text)
+        w.status_label.setText(
+            f"銘柄情報を取得しました: {symbol_name} / 現在値={board_price_text} (Exchange={used_exchange}, URL={used_url})"
+        )
     # ---------- API SETTINGS ----------
     def save_api_account(self):
         w = self.window
