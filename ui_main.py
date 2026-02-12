@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 
 from style import APP_QSS
 
+NIKKEI225_EXCHANGE_CODE = 1
 
 class MainWindow(QMainWindow):
     # ロジック側が拾うためのシグナル
@@ -460,7 +461,7 @@ class MainWindow(QMainWindow):
 
             orders.append({
                 "symbol": symbol,
-                "exchange": 9,
+                "exchange": NIKKEI225_EXCHANGE_CODE,
                 "product": row_widget.product_input.currentData(),
                 "side": side,
                 "qty": int(row_widget.qty_input.value()),
