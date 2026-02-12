@@ -314,6 +314,49 @@ class AppLogic(QObject):
             result = f"{result} {hint}"
         return result
 
+    @staticmethod
+    def _read_http_error_body(err: urllib.error.HTTPError) -> str:
+        try:
+            body = err.read().decode("utf-8", errors="replace")
+            return body.strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _parse_error_json(body: str) -> Optional[dict]:
+        if not body:
+            return None
+        try:
+            parsed = json.loads(body)
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+    def _build_http_error_with_body(self, message: str, err: urllib.error.HTTPError, body: Optional[str] = None) -> str:
+        details = [f"HTTP {err.code}"]
+        body = body if body is not None else self._read_http_error_body(err)
+        if body:
+            payload = self._parse_error_json(body)
+            if payload is None:
+                details.append(body)
+            else:
+                code = payload.get("Code") or payload.get("code")
+                api_message = payload.get("Message") or payload.get("message")
+                if code is not None:
+                    details.append(f"Code={code}")
+                if api_message:
+                    details.append(str(api_message))
+                if code is None and not api_message:
+                    details.append(body)
+        return f"{message}（{' / '.join(details)}）"
+
+    @staticmethod
+    def _normalize_exchange(exchange_value) -> int:
+        exchange = int(exchange_value)
+        if exchange not in {1, 3, 5, 6, 9, 27}:
+            raise ValueError(f"Exchangeが不正です: {exchange}")
+        return exchange
+    
     def fetch_symbol_name(self, symbol: str, row_widget):
         w = self.window
         symbol = symbol.strip()
@@ -598,7 +641,23 @@ class AppLogic(QObject):
         if not token:
             raise RuntimeError(self._build_last_token_error_message("APIトークン取得に失敗"))
         base_url = self._normalize_base_url(api.base_url)
-        data = self._request_json("POST", f"{base_url}/sendorder", headers={"X-API-KEY": token}, payload=payload)
+        try:
+            data = self._request_json("POST", f"{base_url}/sendorder", headers={"X-API-KEY": token}, payload=payload)
+        except urllib.error.HTTPError as e:
+            body = self._read_http_error_body(e)
+            err_payload = self._parse_error_json(body)
+            err_code = (err_payload or {}).get("Code") or (err_payload or {}).get("code")
+            current_exchange = payload.get("Exchange")
+            if str(err_code) == "4001005" and current_exchange != 1:
+                retry_payload = dict(payload)
+                retry_payload["Exchange"] = 1
+                try:
+                    data = self._request_json("POST", f"{base_url}/sendorder", headers={"X-API-KEY": token}, payload=retry_payload)
+                except urllib.error.HTTPError as retry_error:
+                    retry_body = self._read_http_error_body(retry_error)
+                    raise RuntimeError(self._build_http_error_with_body("発注API呼び出しに失敗", retry_error, retry_body)) from retry_error
+            else:
+                raise RuntimeError(self._build_http_error_with_body("発注API呼び出しに失敗", e, body)) from e
         order_id = data.get("OrderId") or data.get("OrderID")
         if not order_id:
             raise RuntimeError(f"注文IDが返却されませんでした: {data}")
@@ -612,6 +671,7 @@ class AppLogic(QObject):
         market = item["entry_type"] == "market"
         payload = {
             "Symbol": item["symbol"],
+            "Exchange": self._normalize_exchange(item["exchange"]),
             "Exchange": int(item["exchange"]),
             "SecurityType": 1,
             "Side": self._side_to_kabu(item["side"]),
@@ -630,7 +690,7 @@ class AppLogic(QObject):
     def _build_exit_payload(self, item: sqlite3.Row, order_type: str, qty: int, price: Optional[float], trigger: Optional[float], hold_id: Optional[str]) -> dict:
         payload = {
             "Symbol": item["symbol"],
-            "Exchange": int(item["exchange"]),
+            "Exchange": self._normalize_exchange(item["exchange"]),
             "SecurityType": 1,
             "Side": self._side_to_kabu("sell" if item["side"] == "buy" else "buy"),
             "Qty": int(qty),
@@ -943,6 +1003,8 @@ class AppLogic(QObject):
         base_url = self._normalize_base_url(api.base_url)
         try:
             self._request_json("PUT", f"{base_url}/cancelorder", headers={"X-API-KEY": token}, payload={"OrderID": api_order_id})
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(self._build_http_error_with_body("取消API呼び出しに失敗", e)) from e
         except Exception:
             return
 

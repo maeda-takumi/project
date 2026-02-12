@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 
 from style import APP_QSS
 
-NIKKEI225_EXCHANGE_CODE = 1
+DEFAULT_EXCHANGE_CODE = 1
 
 class MainWindow(QMainWindow):
     # ロジック側が拾うためのシグナル
@@ -266,6 +266,7 @@ class MainWindow(QMainWindow):
         add_label("銘柄名", width=200)
         add_label("現在値", width=120)
         add_label("信用/現物", width=90)
+        add_label("市場", width=110)
         add_label("売買", width=70)
         add_label("数量", width=90)
         add_label("成行/指値", width=90)
@@ -311,6 +312,18 @@ class MainWindow(QMainWindow):
         row.product_input.currentIndexChanged.connect(self._validate_order_form)
         row.product_input.setFixedWidth(90)
         layout.addWidget(row.product_input)
+
+        row.exchange_input = QComboBox()
+        row.exchange_input.addItem("SOR (9)", 9)
+        row.exchange_input.addItem("東証+ (27)", 27)
+        row.exchange_input.addItem("東証 (1)", 1)
+        row.exchange_input.addItem("名証 (3)", 3)
+        row.exchange_input.addItem("福証 (5)", 5)
+        row.exchange_input.addItem("札証 (6)", 6)
+        row.exchange_input.setCurrentIndex(0)
+        row.exchange_input.currentIndexChanged.connect(self._validate_order_form)
+        row.exchange_input.setFixedWidth(110)
+        layout.addWidget(row.exchange_input)
 
         row.side_input = QComboBox()
         row.side_input.addItem("買", "buy")
@@ -461,7 +474,7 @@ class MainWindow(QMainWindow):
 
             orders.append({
                 "symbol": symbol,
-                "exchange": NIKKEI225_EXCHANGE_CODE,
+                "exchange": int(row_widget.exchange_input.currentData() or DEFAULT_EXCHANGE_CODE),
                 "product": row_widget.product_input.currentData(),
                 "side": side,
                 "qty": int(row_widget.qty_input.value()),
