@@ -1,22 +1,17 @@
-# ui_main.py
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal, QSize, QDateTime
+from PySide6.QtCore import Qt, Signal, QSize
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
-    QLineEdit, QCheckBox, QPushButton,
-    QComboBox, QSpinBox, QMessageBox, QLabel,
-    QStackedWidget, QFrame, QToolButton, QDateTimeEdit, QListWidget,
-    QListWidgetItem, QAbstractItemView
-)
+from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QStackedWidget, QFrame, QToolButton, QLabel, QHBoxLayout, QMessageBox
 
 from style import APP_QSS
+from ui.pages.settings_page import SettingsPage
+from ui.pages.trade_order_page import TradeOrderPage
+from ui.pages.status_page import StatusPage
 
-DEFAULT_EXCHANGE_CODE = 27
+# DEFAULT_EXCHANGE_CODE = 27
 
 class MainWindow(QMainWindow):
-    # ロジック側が拾うためのシグナル
     request_save_api = Signal()
     request_load_api = Signal()
     request_submit_orders = Signal()
@@ -44,27 +39,13 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         layout.addWidget(self.pages, 1)
 
-        # Page 0: 設定（API設定）
-        self.page_settings = QWidget()
-        p0 = QVBoxLayout(self.page_settings)
-        p0.setContentsMargins(0, 0, 0, 0)
-        p0.setSpacing(14)
-        self.api_group = self._build_api_group()
-        p0.addWidget(self.api_group)
-        p0.addStretch(1)
-
-        # Page 1: 自動取引（注文設定）
-        self.page_trading = QWidget()
-        p1 = QVBoxLayout(self.page_trading)
-        p1.setContentsMargins(0, 0, 0, 0)
-        p1.setSpacing(14)
-        self.execution_status_group = self._build_execution_status_group()
-        p1.addWidget(self.execution_status_group)
-        self.order_group = self._build_order_group()
-        p1.addWidget(self.order_group, 1)
+        self.page_settings = SettingsPage()
+        self.page_trading = TradeOrderPage(self.request_symbol_lookup)
+        self.page_status = StatusPage()
 
         self.pages.addWidget(self.page_settings)
         self.pages.addWidget(self.page_trading)
+        self.pages.addWidget(self.page_status)
 
         # --- Status ---
         self.status_label = QLabel("Ready.")
@@ -86,22 +67,24 @@ class MainWindow(QMainWindow):
         row.setContentsMargins(14, 12, 14, 12)
         row.setSpacing(12)
 
-        self.btn_nav_settings = QToolButton()
-        self.btn_nav_settings.setObjectName("navBtn")
-        self.btn_nav_settings.setText("設定")
-        self.btn_nav_settings.setIcon(QIcon("img/option.png"))
-        self.btn_nav_settings.setIconSize(QSize(26, 26))
-        self.btn_nav_settings.setCursor(Qt.PointingHandCursor)
+        nav_defs = [
+            ("設定", "img/option.png", 0),
+            ("取引注文", "img/kabu.png", 1),
+            ("状況確認", "img/status", 2),
+        ]
 
-        self.btn_nav_trading = QToolButton()
-        self.btn_nav_trading.setObjectName("navBtn")
-        self.btn_nav_trading.setText("自動取引")
-        self.btn_nav_trading.setIcon(QIcon("img/kabu.png"))
-        self.btn_nav_trading.setIconSize(QSize(26, 26))
-        self.btn_nav_trading.setCursor(Qt.PointingHandCursor)
+        self.nav_buttons: list[tuple[int, QToolButton]] = []
+        for label, icon_path, page_index in nav_defs:
+            btn = QToolButton()
+            btn.setObjectName("navBtn")
+            btn.setText(label)
+            btn.setIcon(QIcon(icon_path))
+            btn.setIconSize(QSize(26, 26))
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _=False, i=page_index: self.switch_page(i))
+            self.nav_buttons.append((page_index, btn))
+            row.addWidget(btn)
 
-        row.addWidget(self.btn_nav_settings)
-        row.addWidget(self.btn_nav_trading)
         row.addStretch(1)
 
         # 右側に小さく説明ラベル（任意）
@@ -110,451 +93,57 @@ class MainWindow(QMainWindow):
         hint.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
         row.addWidget(hint)
 
-        # click
-        self.btn_nav_settings.clicked.connect(lambda: self.switch_page(0))
-        self.btn_nav_trading.clicked.connect(lambda: self.switch_page(1))
-
         return card
 
     def switch_page(self, index: int):
         self.pages.setCurrentIndex(index)
-        # active 表示
-        self.btn_nav_settings.setProperty("active", index == 0)
-        self.btn_nav_trading.setProperty("active", index == 1)
-        # QSS反映
-        self.btn_nav_settings.style().unpolish(self.btn_nav_settings)
-        self.btn_nav_settings.style().polish(self.btn_nav_settings)
-        self.btn_nav_trading.style().unpolish(self.btn_nav_trading)
-        self.btn_nav_trading.style().polish(self.btn_nav_trading)
-
-    # ========= API SETTINGS（中身は前のまま） =========
-    def _build_api_group(self) -> QGroupBox:
-        g = QGroupBox("API設定")
-        form = QFormLayout(g)
-
-        self.api_name = QLineEdit()
-        self.api_base_url = QLineEdit()
-        self.api_password = QLineEdit()
-        self.api_password.setEchoMode(QLineEdit.Password)
-        self.api_active = QCheckBox("有効")
-        self.api_active.setChecked(True)
-
-        form.addRow("名前", self.api_name)
-        form.addRow("Base URL", self.api_base_url)
-        form.addRow("APIパスワード", self.api_password)
-        form.addRow("", self.api_active)
-
-        btn_row = QHBoxLayout()
-        self.btn_api_load = QPushButton("読込")
-        self.btn_api_save = QPushButton("保存")
-        self.btn_api_save.setObjectName("primary")  # 青ボタンに
-        btn_row.addWidget(self.btn_api_load)
-        btn_row.addWidget(self.btn_api_save)
-        form.addRow(btn_row)
-
-        api_hint = QLabel("※ api_accounts の最新(または有効)レコードを読み書きします")
-        api_hint.setObjectName("muted")
-        api_hint.setWordWrap(True)
-        form.addRow(api_hint)
-
-        return g
-
-    # ========= ORDER SETTINGS（中身は前のまま） =========
-    def _build_execution_status_group(self) -> QGroupBox:
-        g = QGroupBox("注文ステータス")
-        form = QFormLayout(g)
-
-        self.exec_target_label = QLabel("監視対象なし")
-        self.exec_target_label.setObjectName("muted")
-        form.addRow("対象", self.exec_target_label)
-
-        self.entry_status_value = QLabel("待機中")
-        self.tp_status_value = QLabel("待機中")
-        self.sl_status_value = QLabel("待機中")
-
-        form.addRow("注文", self.entry_status_value)
-        form.addRow("利確", self.tp_status_value)
-        form.addRow("損切", self.sl_status_value)
-        return g
-    # ========= ORDER SETTINGS（中身は前のまま） =========
-    def _build_order_group(self) -> QGroupBox:
-        g = QGroupBox("注文設定")
-        v = QVBoxLayout(g)
-
-        self.order_header = self._build_order_header()
-        v.addWidget(self.order_header)
-
-        self.orders_list = QListWidget()
-        self.orders_list.setObjectName("orderList")
-        self.orders_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        v.addWidget(self.orders_list)
-
-        row_tools = QHBoxLayout()
-        self.btn_add_row = QPushButton("行追加")
-        self.btn_remove_row = QPushButton("選択行削除")
-        row_tools.addWidget(self.btn_add_row)
-        row_tools.addWidget(self.btn_remove_row)
-        row_tools.addStretch(1)
-        v.addLayout(row_tools)
-
-        run_row = QHBoxLayout()
-
-        self.order_run_mode = QComboBox()
-        self.order_run_mode.addItem("即時実行", "immediate")
-        self.order_run_mode.addItem("予約実行", "scheduled")
-        run_row.addWidget(self._build_form_row("実行方式", self.order_run_mode))
-
-        self.order_scheduled_at = QDateTimeEdit()
-        self.order_scheduled_at.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
-        self.order_scheduled_at.setDateTime(QDateTime.currentDateTime())
-        self.order_scheduled_at.setCalendarPopup(True)
-        self.schedule_row = self._build_form_row("実行日時", self.order_scheduled_at)
-        run_row.addWidget(self.schedule_row)
-        run_row.addStretch(1)
-        v.addLayout(run_row)
-
-        hint = QLabel("行追加で複数注文に対応。損切/利確は差額入力（符号は内部で自動付与）")
-        hint.setObjectName("muted")
-        v.addWidget(hint)
-
-        self.order_error_label = QLabel("")
-        self.order_error_label.setObjectName("error")
-        self.order_error_label.setWordWrap(True)
-        v.addWidget(self.order_error_label)
-
-        tool = QHBoxLayout()
-        self.btn_clear = QPushButton("クリア")
-        self.btn_clear.setObjectName("danger")
-        tool.addWidget(self.btn_clear)
-        tool.addStretch(1)
-
-        self.btn_submit = QPushButton("送信（DB保存）")
-        self.btn_submit.setObjectName("primary")  # 青
-        tool.addWidget(self.btn_submit)
-        v.addLayout(tool)
-
-        self._add_order_row()
-        self._update_order_field_visibility()
-        self._validate_order_form()
-        return g
+        for page_index, btn in self.nav_buttons:
+            btn.setProperty("active", page_index == index)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
 
     def _wire_ui_events(self):
-        self.btn_api_save.clicked.connect(self.request_save_api.emit)
-        self.btn_api_load.clicked.connect(self.request_load_api.emit)
+        self.page_settings.btn_api_save.clicked.connect(self.request_save_api.emit)
+        self.page_settings.btn_api_load.clicked.connect(self.request_load_api.emit)
+        self.page_trading.wire_events(self.request_clear_orders.emit, self.request_submit_orders.emit)
 
-        self.btn_clear.clicked.connect(self.request_clear_orders.emit)
-        self.btn_submit.clicked.connect(self.request_submit_orders.emit)
-
-        self.order_run_mode.currentIndexChanged.connect(self._handle_run_mode_change)
-
-        self.btn_add_row.clicked.connect(self._add_order_row)
-        self.btn_remove_row.clicked.connect(self._remove_selected_rows)
-
-        self.order_run_mode.currentIndexChanged.connect(self._validate_order_form)
-        self.order_scheduled_at.dateTimeChanged.connect(self._validate_order_form)
-
-    def _build_form_row(self, label_text: str, widget: QWidget) -> QWidget:
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
-        label = QLabel(label_text)
-        label.setMinimumWidth(140)
-        layout.addWidget(label)
-        layout.addWidget(widget, 1)
-        return row
-
-    def _build_order_header(self) -> QWidget:
-        header = QWidget()
-        layout = QHBoxLayout(header)
-        layout.setContentsMargins(6, 0, 6, 0)
-        layout.setSpacing(8)
-
-        spacer = QLabel("")
-        spacer.setFixedWidth(24)
-        layout.addWidget(spacer)
-
-        def add_label(text: str, width: int | None = None, stretch: int = 0):
-            label = QLabel(text)
-            label.setObjectName("muted")
-            if width is not None:
-                label.setFixedWidth(width)
-            layout.addWidget(label, stretch)
-
-        add_label("銘柄コード", stretch=1)
-        add_label("銘柄名", width=200)
-        add_label("現在値", width=120)
-        add_label("信用/現物", width=90)
-        add_label("市場", width=110)
-        add_label("売買", width=70)
-        add_label("数量", width=90)
-        add_label("成行/指値", width=90)
-        add_label("指値価格", width=110)
-        add_label("損切差額", width=110)
-        add_label("利確差額", width=110)
-        return header
-
-    def _build_order_row_widget(self) -> QWidget:
-        row = QWidget()
-        row.setObjectName("orderRow")
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(8)
-
-        row.select_box = QCheckBox()
-        row.select_box.setFixedWidth(24)
-        layout.addWidget(row.select_box)
-
-        row.symbol_input = QLineEdit()
-        row.symbol_input.setPlaceholderText("例: 9432")
-        row.symbol_input.editingFinished.connect(
-            lambda row_widget=row: self._request_symbol_lookup(row_widget)
-        )
-        row.symbol_input.textChanged.connect(self._handle_symbol_text_change)
-        row.symbol_input.textChanged.connect(self._validate_order_form)
-        layout.addWidget(row.symbol_input, 1)
-        row.symbol_name_label = QLineEdit()
-        row.symbol_name_label.setReadOnly(True)
-        row.symbol_name_label.setPlaceholderText("銘柄名")
-        row.symbol_name_label.setFixedWidth(200)
-        layout.addWidget(row.symbol_name_label)
-
-        row.current_price_label = QLineEdit()
-        row.current_price_label.setReadOnly(True)
-        row.current_price_label.setPlaceholderText("現在値")
-        row.current_price_label.setFixedWidth(120)
-        layout.addWidget(row.current_price_label)
-
-        row.product_input = QComboBox()
-        row.product_input.addItem("現物", "cash")
-        row.product_input.addItem("信用", "margin")
-        row.product_input.currentIndexChanged.connect(self._validate_order_form)
-        row.product_input.setFixedWidth(90)
-        layout.addWidget(row.product_input)
-
-        row.exchange_input = QComboBox()
-        row.exchange_input.addItem("SOR (9)", 9)
-        row.exchange_input.addItem("東証+ (27)", 27)
-        row.exchange_input.addItem("東証 (1)", 1)
-        row.exchange_input.addItem("名証 (3)", 3)
-        row.exchange_input.addItem("福証 (5)", 5)
-        row.exchange_input.addItem("札証 (6)", 6)
-        row.exchange_input.setCurrentIndex(0)
-        row.exchange_input.currentIndexChanged.connect(self._validate_order_form)
-        row.exchange_input.setFixedWidth(110)
-        layout.addWidget(row.exchange_input)
-
-        row.side_input = QComboBox()
-        row.side_input.addItem("買", "buy")
-        row.side_input.addItem("売", "sell")
-        row.side_input.currentIndexChanged.connect(self._validate_order_form)
-        row.side_input.setFixedWidth(70)
-        layout.addWidget(row.side_input)
-
-        row.qty_input = QSpinBox()
-        row.qty_input.setRange(1, 1_000_000)
-        row.qty_input.setValue(100)
-        row.qty_input.valueChanged.connect(self._validate_order_form)
-        row.qty_input.setFixedWidth(90)
-        layout.addWidget(row.qty_input)
-
-        row.entry_type_input = QComboBox()
-        row.entry_type_input.addItem("成行", "market")
-        row.entry_type_input.addItem("指値", "limit")
-        row.entry_type_input.currentIndexChanged.connect(
-            lambda _=None, row_widget=row: self._handle_entry_type_change(row_widget)
-        )
-        row.entry_type_input.setFixedWidth(90)
-        layout.addWidget(row.entry_type_input)
-
-        row.limit_price_input = QSpinBox()
-        row.limit_price_input.setRange(1, 1_000_000_000)
-        row.limit_price_input.setValue(1)
-        row.limit_price_input.setSuffix(" 円")
-        row.limit_price_input.valueChanged.connect(self._validate_order_form)
-        row.limit_price_input.setEnabled(False)
-        row.limit_price_input.setFixedWidth(110)
-        layout.addWidget(row.limit_price_input)
-
-        row.sl_diff_input = QSpinBox()
-        row.sl_diff_input.setRange(1, 1_000_000_000)
-        row.sl_diff_input.setValue(1)
-        row.sl_diff_input.setSuffix(" 円")
-        row.sl_diff_input.valueChanged.connect(self._validate_order_form)
-        row.sl_diff_input.setFixedWidth(110)
-        layout.addWidget(row.sl_diff_input)
-
-        row.tp_diff_input = QSpinBox()
-        row.tp_diff_input.setRange(1, 1_000_000_000)
-        row.tp_diff_input.setValue(1)
-        row.tp_diff_input.setSuffix(" 円")
-        row.tp_diff_input.valueChanged.connect(self._validate_order_form)
-        row.tp_diff_input.setFixedWidth(110)
-        layout.addWidget(row.tp_diff_input)
-
-        return row
-
-    def _iter_order_row_widgets(self):
-        for index in range(self.orders_list.count()):
-            item = self.orders_list.item(index)
-            widget = self.orders_list.itemWidget(item)
-            if widget is not None:
-                yield widget
-
-    def _update_order_field_visibility(self):
-        is_scheduled = self.order_run_mode.currentData() == "scheduled"
-        self.schedule_row.setVisible(is_scheduled)
-
-    def _handle_entry_type_change(self, row_widget: QWidget):
-        self._set_row_limit_state(row_widget)
-        self._validate_order_form()
-
-    def _handle_run_mode_change(self):
-        self._update_order_field_visibility()
-        self._validate_order_form()
-
-    def _request_symbol_lookup(self, row_widget: QWidget):
-        symbol = row_widget.symbol_input.text().strip()
-        if not symbol:
-            self.set_symbol_name(row_widget, "")
-            self.set_symbol_price(row_widget, "")
-            return
-        self.set_symbol_name(row_widget, "取得中...")
-        self.set_symbol_price(row_widget, "取得中...")
-        self.request_symbol_lookup.emit(symbol, row_widget)
-
-    def set_symbol_name(self, row_widget: QWidget, name: str):
-        if getattr(row_widget, "symbol_name_label", None) is not None:
-            row_widget.symbol_name_label.setText(name)
-
-    def set_symbol_price(self, row_widget: QWidget, price_text: str):
-        if getattr(row_widget, "current_price_label", None) is not None:
-            row_widget.current_price_label.setText(price_text)
-
-    def _add_order_row(self):
-        row_widget = self._build_order_row_widget()
-        item = QListWidgetItem()
-        item.setSizeHint(row_widget.sizeHint())
-        self.orders_list.addItem(item)
-        self.orders_list.setItemWidget(item, row_widget)
-        self._set_row_limit_state(row_widget)
-        self._validate_order_form()
-
-    def _remove_selected_rows(self):
-        selected_items = self.orders_list.selectedItems()
-        if not selected_items:
-            selected_items = [
-                item for item in (self.orders_list.item(i) for i in range(self.orders_list.count()))
-                if (widget := self.orders_list.itemWidget(item)) is not None
-                and getattr(widget, "select_box", None)
-                and widget.select_box.isChecked()
-            ]
-        selected_rows = sorted({self.orders_list.row(item) for item in selected_items}, reverse=True)
-        for row in selected_rows:
-            self.orders_list.takeItem(row)
-        if self.orders_list.count() == 0:
-            self._add_order_row()
-        self._validate_order_form()
-
-    def _set_row_limit_state(self, row_widget: QWidget):
-        entry_type = row_widget.entry_type_input.currentData()
-        row_widget.limit_price_input.setEnabled(entry_type == "limit")
+    @property
+    def api_name(self):
+        return self.page_settings.api_name
+    
+    @property
+    def api_base_url(self):
+        return self.page_settings.api_base_url
+    
+    @property
+    def api_password(self):
+        return self.page_settings.api_password
+    
+    @property
+    def api_active(self):
+        return self.page_settings.api_active
 
     def clear_orders(self):
-        self.orders_list.clear()
-        self._add_order_row()
-        self.order_run_mode.setCurrentIndex(0)
-        self.order_scheduled_at.setDateTime(QDateTime.currentDateTime())
-        self._update_order_field_visibility()
-        self._validate_order_form()
-
-    def get_orders_payload(self):
-        orders = []
-        for row_widget in self._iter_order_row_widgets():
-            symbol = row_widget.symbol_input.text().strip()
-            if not symbol:
-                continue
-
-            entry_type = row_widget.entry_type_input.currentData()
-            side = row_widget.side_input.currentData()
-            tp_diff = int(row_widget.tp_diff_input.value())
-            sl_diff = int(row_widget.sl_diff_input.value())
-
-            if side == "buy":
-                tp_signed = tp_diff
-                sl_signed = -sl_diff
-            else:
-                tp_signed = -tp_diff
-                sl_signed = sl_diff
-
-            entry_price = None
-            if entry_type == "limit":
-                entry_price = int(row_widget.limit_price_input.value())
-
-            orders.append({
-                "symbol": symbol,
-                "exchange": int(row_widget.exchange_input.currentData() or DEFAULT_EXCHANGE_CODE),
-                "product": row_widget.product_input.currentData(),
-                "side": side,
-                "qty": int(row_widget.qty_input.value()),
-                "entry_type": entry_type,
-                "entry_price": entry_price,
-                "tp_price": float(tp_signed),
-                "sl_trigger_price": float(sl_signed),
-                "batch_name": "手動バッチ",
-                "memo": "",
-                "run_mode": self.order_run_mode.currentData(),
-                "scheduled_at": self.order_scheduled_at.dateTime().toString("yyyy-MM-dd HH:mm:ss"),
-            })
-
-        return orders
+        self.page_trading.clear_orders()
 
     def get_order_validation_errors(self) -> list[str]:
-        errors = []
-        if self.orders_list.count() == 0:
-            errors.append("注文行を追加してください。")
-            return errors
+        return self.page_trading.get_order_validation_errors()
 
-        for index, row_widget in enumerate(self._iter_order_row_widgets()):
-            symbol = row_widget.symbol_input.text().strip()
-            if not symbol:
-                errors.append(f"{index + 1}行目: 銘柄コードを入力してください。")
-                continue
+    def get_orders_payload(self):
+        return self.page_trading.get_orders_payload()
+    
+    def set_symbol_name(self, row_widget: QWidget, name: str):
+        self.page_trading.set_symbol_name(row_widget, name)
 
-            entry_type = row_widget.entry_type_input.currentData()
-            if entry_type == "limit" and row_widget.limit_price_input.value() < 1:
-                errors.append(f"{index + 1}行目: 指値価格は1円以上で指定してください。")
+    def set_symbol_price(self, row_widget: QWidget, price_text: str):
+        self.page_trading.set_symbol_price(row_widget, price_text)
 
-            if row_widget.sl_diff_input.value() < 1:
-                errors.append(f"{index + 1}行目: 損切差額は1円以上で指定してください。")
+    def set_execution_status(self, target: str, entry: str, tp: str, sl: str):
+        self.page_trading.set_execution_status(target, entry, tp, sl)
 
-            if row_widget.tp_diff_input.value() < 1:
-                errors.append(f"{index + 1}行目: 利確差額は1円以上で指定してください。")
-
-            if row_widget.qty_input.value() < 1:
-                errors.append(f"{index + 1}行目: 数量は1以上で指定してください。")
-        return errors
-
-    def _validate_order_form(self):
-        errors = self.get_order_validation_errors()
-        if errors:
-            self.order_error_label.setText(" / ".join(errors))
-            self.btn_submit.setEnabled(False)
-        else:
-            self.order_error_label.setText("")
-            self.btn_submit.setEnabled(True)
-
-
-    def _handle_symbol_text_change(self):
-        self._validate_order_form()
-        sender = self.sender()
-        if sender is None:
-            return
-        for row_widget in self._iter_order_row_widgets():
-            if getattr(row_widget, "symbol_input", None) is sender:
-                self.set_symbol_name(row_widget, "")
-                self.set_symbol_price(row_widget, "")
-                break
+    def set_open_order_cards(self, items: list[dict]):
+        self.page_status.set_cards(items)
+        
     def toast(self, title: str, message: str, error: bool = False):
         self.status_label.setText(message)
         box = QMessageBox(self)
@@ -562,9 +151,3 @@ class MainWindow(QMainWindow):
         box.setWindowTitle(title)
         box.setText(message)
         box.exec()
-
-    def set_execution_status(self, target: str, entry: str, tp: str, sl: str):
-        self.exec_target_label.setText(target)
-        self.entry_status_value.setText(entry)
-        self.tp_status_value.setText(tp)
-        self.sl_status_value.setText(sl)

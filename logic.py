@@ -632,12 +632,16 @@ class AppLogic(QObject):
 
     def _refresh_execution_status_ui(self) -> None:
         with self._conn() as conn:
-            row = conn.execute(
+            rows = conn.execute(
                 """
                 SELECT bi.id,
                        bi.symbol,
+                       bi.side,
+                       bi.qty,
                        bi.status AS item_status,
                        bi.last_error,
+                       bi.entry_filled_qty,
+                       bi.closed_qty,
                        oe.status AS entry_order_status,
                        otp.status AS tp_order_status,
                        osl.status AS sl_order_status
@@ -647,47 +651,62 @@ class AppLogic(QObject):
                 LEFT JOIN orders otp ON otp.api_order_id = bi.tp_order_id
                 LEFT JOIN orders osl ON osl.api_order_id = bi.sl_order_id
                 WHERE bj.status IN ('SCHEDULED', 'RUNNING')
+                  AND bi.status != 'CLOSED'
                 ORDER BY bi.updated_at DESC, bi.id DESC
-                LIMIT 1
                 """
-            ).fetchone()
+            ).fetchall()
 
-        if not row:
+        if not rows:
             self.window.set_execution_status("監視対象なし", "待機中", "待機中", "待機中")
+            self.window.set_open_order_cards([])
             return
 
-        target = f"#{row['id']} {row['symbol']}"
-        item_status = str(row["item_status"] or "")
+        cards: list[dict] = []
+        for row in rows:
+            item_status = str(row["item_status"] or "")
+            entry_status = self._render_order_status(row["entry_order_status"], fallback_waiting="未送信")
+            tp_status = self._render_order_status(row["tp_order_status"])
+            sl_status = self._render_order_status(row["sl_order_status"])
 
-        if item_status == "ERROR":
-            err = (row["last_error"] or "エラー").splitlines()[0]
+            if item_status in {"READY", "ENTRY_SENT", "ENTRY_PARTIAL", "ENTRY_FILLED"}:
+                if item_status == "READY":
+                    entry_status = "送信待ち"
+                tp_status = "待機中"
+                sl_status = "待機中"
+
+            if item_status == "BRACKET_SENT":
+                tp_status = self._render_order_status(row["tp_order_status"], fallback_waiting="発注済")
+                sl_status = self._render_order_status(row["sl_order_status"], fallback_waiting="発注済")
+
+            cards.append({
+                "id": row["id"],
+                "symbol": row["symbol"],
+                "side_label": "買" if row["side"] == "buy" else "売",
+                "qty": int(row["qty"] or 0),
+                "item_status_label": item_status,
+                "entry_status_label": entry_status,
+                "tp_status_label": tp_status,
+                "sl_status_label": sl_status,
+                "entry_filled_qty": int(row["entry_filled_qty"] or 0),
+                "closed_qty": int(row["closed_qty"] or 0),
+                "last_error": row["last_error"] or "",
+            })
+
+        latest = rows[0]
+        target = f"#{latest['id']} {latest['symbol']}"
+        if str(latest["item_status"] or "") == "ERROR":
+            err = (latest["last_error"] or "エラー").splitlines()[0]
             self.window.set_execution_status(target, f"エラー: {err}", "-", "-")
-            return
+        else:
+            self.window.set_execution_status(
+                target,
+                cards[0]["entry_status_label"],
+                cards[0]["tp_status_label"],
+                cards[0]["sl_status_label"],
+            )
 
-        entry_status = self._render_order_status(row["entry_order_status"], fallback_waiting="未送信")
-        tp_status = self._render_order_status(row["tp_order_status"])
-        sl_status = self._render_order_status(row["sl_order_status"])
+        self.window.set_open_order_cards(cards)
 
-        if item_status in {"READY", "ENTRY_SENT", "ENTRY_PARTIAL", "ENTRY_FILLED"}:
-            if item_status == "READY":
-                entry_status = "送信待ち"
-            tp_status = "待機中"
-            sl_status = "待機中"
-
-        if item_status == "BRACKET_SENT":
-            tp_status = self._render_order_status(row["tp_order_status"], fallback_waiting="発注済")
-            sl_status = self._render_order_status(row["sl_order_status"], fallback_waiting="発注済")
-
-        if item_status == "CLOSED":
-            entry_status = "約定済"
-            if row["tp_order_status"] == "FILLED":
-                tp_status = "約定済"
-                sl_status = "取消済"
-            elif row["sl_order_status"] == "FILLED":
-                tp_status = "取消済"
-                sl_status = "約定済"
-
-        self.window.set_execution_status(target, entry_status, tp_status, sl_status)
     def _scheduler_step(self):
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._conn() as conn:

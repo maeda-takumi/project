@@ -205,4 +205,9 @@ QToolButton#navBtn {{
   qproperty-toolButtonStyle: ToolButtonTextUnderIcon;
 }}
 
+QFrame#statusCard {{
+  background: #FFFFFF;
+  border: 1px solid #E5E7EB;
+  border-radius: 12px;
+}}
 """
