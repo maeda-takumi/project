@@ -91,8 +91,8 @@ class AppLogic(QObject):
                     base_url TEXT NOT NULL,
                     api_password_enc TEXT NOT NULL,
                     is_active INTEGER NOT NULL DEFAULT 1,
-                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now','+9 hours')),
+                    updated_at DATETIME NOT NULL DEFAULT (datetime('now','+9 hours'))
                 );
                 """
             )
@@ -108,8 +108,8 @@ class AppLogic(QObject):
                     scheduled_at DATETIME,
                     eod_close_time TEXT NOT NULL,
                     eod_force_close INTEGER NOT NULL DEFAULT 1,
-                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now','+9 hours')),
+                    updated_at DATETIME NOT NULL DEFAULT (datetime('now','+9 hours')),
                     FOREIGN KEY (api_account_id) REFERENCES api_accounts(id)
                 );
                 """
@@ -130,8 +130,8 @@ class AppLogic(QObject):
                     sl_trigger_price REAL,
                     status TEXT NOT NULL,
                     last_error TEXT,
-                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now','+9 hours')),
+                    updated_at DATETIME NOT NULL DEFAULT (datetime('now','+9 hours')),
                     FOREIGN KEY (batch_job_id) REFERENCES batch_jobs(id)
                 );
                 """
@@ -144,7 +144,7 @@ class AppLogic(QObject):
                     level TEXT NOT NULL,
                     event_type TEXT NOT NULL,
                     message TEXT NOT NULL,
-                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now','+9 hours')),
                     FOREIGN KEY (batch_job_id) REFERENCES batch_jobs(id)
                 );
                 """
@@ -165,11 +165,11 @@ class AppLogic(QObject):
                     status TEXT NOT NULL,
                     cum_qty INTEGER NOT NULL DEFAULT 0,
                     avg_price REAL,
-                    sent_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    sent_at DATETIME NOT NULL DEFAULT (datetime('now','+9 hours')),
                     last_sync_at DATETIME,
                     raw_json TEXT,
-                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now','+9 hours')),
+                    updated_at DATETIME NOT NULL DEFAULT (datetime('now','+9 hours')),
                     UNIQUE(api_order_id),
                     FOREIGN KEY (batch_item_id) REFERENCES batch_items(id)
                 );
@@ -583,14 +583,14 @@ class AppLogic(QObject):
                 (now_str,),
             ).fetchall()
             for row in rows:
-                conn.execute("UPDATE batch_jobs SET status='RUNNING', updated_at=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
+                conn.execute("UPDATE batch_jobs SET status='RUNNING', updated_at=datetime('now','+9 hours') WHERE id=?", (row["id"],))
                 self._log_event(int(row["id"]), "INFO", "SCHEDULE_TRIGGERED", "予約時刻到達でRUNNINGに遷移", conn=conn)
 
             immediate_rows = conn.execute(
                 "SELECT id FROM batch_jobs WHERE status='SCHEDULED' AND run_mode='immediate'"
             ).fetchall()
             for row in immediate_rows:
-                conn.execute("UPDATE batch_jobs SET status='RUNNING', updated_at=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
+                conn.execute("UPDATE batch_jobs SET status='RUNNING', updated_at=datetime('now','+9 hours') WHERE id=?", (row["id"],))
                 self._log_event(int(row["id"]), "INFO", "IMMEDIATE_TRIGGERED", "即時実行バッチを開始", conn=conn)
 
     def _api_post_order(self, api: ApiAccount, payload: dict) -> str:
@@ -669,7 +669,7 @@ class AppLogic(QObject):
             """
             INSERT OR REPLACE INTO orders
             (batch_item_id, order_role, api_order_id, side, qty, order_type, price, trigger_price, hold_id, status, raw_json, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'NEW', '{}', CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'NEW', '{}', datetime('now','+9 hours'))
             """,
             (item_id, role, api_order_id, side, qty, order_type, price, trigger_price, hold_id),
         )
@@ -695,7 +695,7 @@ class AppLogic(QObject):
             except Exception as e:
                 with self._conn() as conn:
                     conn.execute(
-                        "UPDATE batch_items SET status='ERROR', last_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        "UPDATE batch_items SET status='ERROR', last_error=?, updated_at=datetime('now','+9 hours') WHERE id=?",
                         (str(e), item["id"]),
                     )
                     self._log_event(
@@ -711,7 +711,7 @@ class AppLogic(QObject):
                 conn.execute(
                     """
                     UPDATE batch_items
-                    SET status='ENTRY_SENT', entry_order_id=?, updated_at=CURRENT_TIMESTAMP
+                    SET status='ENTRY_SENT', entry_order_id=?, updated_at=datetime('now','+9 hours')
                     WHERE id=?
                     """,
                     (order_id, item["id"]),
@@ -798,7 +798,7 @@ class AppLogic(QObject):
                     conn.execute(
                         """
                         UPDATE orders
-                        SET status=?, cum_qty=?, avg_price=?, raw_json=?, last_sync_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+                        SET status=?, cum_qty=?, avg_price=?, raw_json=?, last_sync_at=datetime('now','+9 hours'), updated_at=datetime('now','+9 hours')
                         WHERE api_order_id=?
                         """,
                         (status, cum_qty, float(avg_price) if avg_price else None, json.dumps(api_order, ensure_ascii=False), str(oid)),
@@ -812,7 +812,7 @@ class AppLogic(QObject):
                         conn.execute(
                             """
                             UPDATE batch_items
-                            SET status=?, entry_filled_qty=?, entry_avg_price=?, updated_at=CURRENT_TIMESTAMP
+                            SET status=?, entry_filled_qty=?, entry_avg_price=?, updated_at=datetime('now','+9 hours')
                             WHERE id=?
                             """,
                             (new_status, cum_qty, float(avg_price) if avg_price else None, item_id),
@@ -870,7 +870,7 @@ class AppLogic(QObject):
             except Exception as e:
                 with self._conn() as conn:
                     conn.execute(
-                        "UPDATE batch_items SET status='ERROR', last_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        "UPDATE batch_items SET status='ERROR', last_error=?, updated_at=datetime('now','+9 hours') WHERE id=?",
                         (str(e), item["id"]),
                     )
                     self._log_event(
@@ -886,7 +886,7 @@ class AppLogic(QObject):
                 conn.execute(
                     """
                     UPDATE batch_items
-                    SET status='BRACKET_SENT', tp_order_id=?, sl_order_id=?, updated_at=CURRENT_TIMESTAMP
+                    SET status='BRACKET_SENT', tp_order_id=?, sl_order_id=?, updated_at=datetime('now','+9 hours')
                     WHERE id=?
                     """,
                     (tp_order_id, sl_order_id, item["id"]),
@@ -922,7 +922,7 @@ class AppLogic(QObject):
                 self._cancel_order_if_needed(api, row["sl_order_id"])
                 with self._conn() as conn:
                     conn.execute(
-                        "UPDATE batch_items SET status='CLOSED', closed_qty=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        "UPDATE batch_items SET status='CLOSED', closed_qty=?, updated_at=datetime('now','+9 hours') WHERE id=?",
                         (int(row["tp_cum"] or 0), item_id),
                     )
                     self._log_event(int(row["batch_job_id"]), "INFO", "TP_FILLED", f"item={item_id}", conn=conn)
@@ -930,7 +930,7 @@ class AppLogic(QObject):
                 self._cancel_order_if_needed(api, row["tp_order_id"])
                 with self._conn() as conn:
                     conn.execute(
-                        "UPDATE batch_items SET status='CLOSED', closed_qty=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        "UPDATE batch_items SET status='CLOSED', closed_qty=?, updated_at=datetime('now','+9 hours') WHERE id=?",
                         (int(row["sl_cum"] or 0), item_id),
                     )
                     self._log_event(int(row["batch_job_id"]), "INFO", "SL_FILLED", f"item={item_id}", conn=conn)
@@ -972,7 +972,7 @@ class AppLogic(QObject):
                 remaining = max(int(item["entry_filled_qty"] or 0) - int(item["closed_qty"] or 0), 0)
                 if remaining <= 0:
                     with self._conn() as conn:
-                        conn.execute("UPDATE batch_items SET status='CLOSED', updated_at=CURRENT_TIMESTAMP WHERE id=?", (item["id"],))
+                        conn.execute("UPDATE batch_items SET status='CLOSED', updated_at=datetime('now','+9 hours') WHERE id=?", (item["id"],))
                     continue
                 if item["product"] == "margin" and not item["hold_id"]:
                     continue
@@ -980,7 +980,7 @@ class AppLogic(QObject):
                 eod_order_id = self._api_post_order(api, payload)
             except Exception as e:
                 with self._conn() as conn:
-                    conn.execute("UPDATE batch_items SET status='ERROR', last_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (str(e), item["id"]))
+                    conn.execute("UPDATE batch_items SET status='ERROR', last_error=?, updated_at=datetime('now','+9 hours') WHERE id=?", (str(e), item["id"]))
                     self._log_event(
                         int(item["batch_job_id"]),
                         "ERROR",
@@ -996,7 +996,7 @@ class AppLogic(QObject):
                 conn.execute(
                     """
                     UPDATE batch_items
-                    SET eod_order_id=?, status='EOD_MARKET_SENT', updated_at=CURRENT_TIMESTAMP
+                    SET eod_order_id=?, status='EOD_MARKET_SENT', updated_at=datetime('now','+9 hours')
                     WHERE id=?
                     """,
                     (eod_order_id, item["id"]),
@@ -1020,7 +1020,7 @@ class AppLogic(QObject):
             ).fetchall()
             for row in done_rows:
                 if row["status"] == "FILLED":
-                    conn.execute("UPDATE batch_items SET status='CLOSED', updated_at=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
+                    conn.execute("UPDATE batch_items SET status='CLOSED', updated_at=datetime('now','+9 hours') WHERE id=?", (row["id"],))
                     self._log_event(int(row["batch_job_id"]), "INFO", "EOD_FILLED", f"item={row['id']}", conn=conn)
 
     def _finalize_jobs_step(self):
@@ -1036,8 +1036,8 @@ class AppLogic(QObject):
                 closed = by_status.get("CLOSED", 0)
                 errors = by_status.get("ERROR", 0)
                 if total > 0 and closed == total:
-                    conn.execute("UPDATE batch_jobs SET status='DONE', updated_at=CURRENT_TIMESTAMP WHERE id=?", (job["id"],))
+                    conn.execute("UPDATE batch_jobs SET status='DONE', updated_at=datetime('now','+9 hours') WHERE id=?", (job["id"],))
                     self._log_event(int(job["id"]), "INFO", "BATCH_DONE", "全銘柄が決済完了", conn=conn)
                 elif errors > 0:
-                    conn.execute("UPDATE batch_jobs SET status='ERROR', updated_at=CURRENT_TIMESTAMP WHERE id=?", (job["id"],))
+                    conn.execute("UPDATE batch_jobs SET status='ERROR', updated_at=datetime('now','+9 hours') WHERE id=?", (job["id"],))
                     self._log_event(int(job["id"]), "ERROR", "BATCH_ERROR", f"error_items={errors}", conn=conn)
