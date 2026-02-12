@@ -502,7 +502,7 @@ class AppLogic(QObject):
         initial_status = "SCHEDULED"
 
         try:
-            with self._conn() as conn:
+            def _write_batch(conn: sqlite3.Connection):
                 cur = conn.execute(
                     """
                     INSERT INTO batch_jobs (batch_code, api_account_id, name, status, run_mode, scheduled_at, eod_close_time, eod_force_close)
@@ -546,6 +546,7 @@ class AppLogic(QObject):
                 return batch_job_id
 
             self._run_with_db_retry(_write_batch)
+
             w.toast("送信完了", f"バッチを作成しDBに保存しました。（items={len(orders)}）")
         except Exception as e:
             w.toast("送信失敗", f"DB保存に失敗: {e}", error=True)
