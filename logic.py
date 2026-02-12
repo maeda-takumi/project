@@ -10,13 +10,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, QTimer
 
 from ui_main import MainWindow
 
 
 @dataclass
 class ApiAccount:
+    id: int
     name: str
     base_url: str
     api_password_enc: str
@@ -32,6 +33,8 @@ class AppLogic(QObject):
         self._api_token_base_url: Optional[str] = None
         self._last_api_token_error: Optional[Exception] = None
         self._last_api_token_error_detail: Optional[str] = None
+        self._worker_timer: Optional[QTimer] = None
+        self._worker_busy = False
         self._init_db()
 
     @staticmethod
@@ -50,12 +53,20 @@ class AppLogic(QObject):
         w.request_clear_orders.connect(self.clear_orders)
         w.request_submit_orders.connect(self.submit_orders_to_db)
 
+        self._worker_timer = QTimer(self)
+        self._worker_timer.timeout.connect(self._worker_tick)
+        self._worker_timer.start(2_000)
     # ---------- DB ----------
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
         return conn
+
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
     def _init_db(self) -> None:
         with self._conn() as conn:
@@ -125,13 +136,55 @@ class AppLogic(QObject):
                 );
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_item_id INTEGER NOT NULL,
+                    order_role TEXT NOT NULL,
+                    api_order_id TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    qty INTEGER NOT NULL,
+                    order_type TEXT NOT NULL,
+                    price REAL,
+                    trigger_price REAL,
+                    hold_id TEXT,
+                    status TEXT NOT NULL,
+                    cum_qty INTEGER NOT NULL DEFAULT 0,
+                    avg_price REAL,
+                    sent_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_sync_at DATETIME,
+                    raw_json TEXT,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(api_order_id),
+                    FOREIGN KEY (batch_item_id) REFERENCES batch_items(id)
+                );
+                """
+            )
+
+            self._ensure_column(conn, "batch_items", "entry_order_id", "entry_order_id TEXT")
+            self._ensure_column(conn, "batch_items", "tp_order_id", "tp_order_id TEXT")
+            self._ensure_column(conn, "batch_items", "sl_order_id", "sl_order_id TEXT")
+            self._ensure_column(conn, "batch_items", "eod_order_id", "eod_order_id TEXT")
+            self._ensure_column(conn, "batch_items", "entry_filled_qty", "entry_filled_qty INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "batch_items", "entry_avg_price", "entry_avg_price REAL")
+            self._ensure_column(conn, "batch_items", "closed_qty", "closed_qty INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "batch_items", "hold_id", "hold_id TEXT")
+
+    def _log_event(self, batch_job_id: int, level: str, event_type: str, message: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO event_logs (batch_job_id, level, event_type, message) VALUES (?, ?, ?, ?)",
+                (batch_job_id, level, event_type, message),
+            )
 
     def _get_active_api_account(self) -> Optional[ApiAccount]:
         try:
             with self._conn() as conn:
                 row = conn.execute(
                     """
-                    SELECT name, base_url, api_password_enc, is_active
+                    SELECT id, name, base_url, api_password_enc, is_active
                     FROM api_accounts
                     WHERE is_active = 1
                     ORDER BY id DESC
@@ -141,6 +194,7 @@ class AppLogic(QObject):
             if not row:
                 return None
             return ApiAccount(
+                id=int(row["id"]),
                 name=row["name"],
                 base_url=row["base_url"],
                 api_password_enc=row["api_password_enc"],
@@ -249,7 +303,7 @@ class AppLogic(QObject):
             return
 
         base_url = self._normalize_base_url(api.base_url)
-        exchange_candidates = (1, 3, 5, 6)
+        exchange_candidates = (1, 3, 5, 6, 9)
 
         def request_symbol_with_token(current_token: str):
             last_error: Optional[Exception] = None
@@ -265,7 +319,6 @@ class AppLogic(QObject):
                             return data, exchange, candidate_url
                     except urllib.error.HTTPError as e:
                         last_error = e
-                        # 401はトークン再取得対象、400/404は別市場コードを試す
                         if e.code == 401:
                             raise
                         continue
@@ -309,7 +362,7 @@ class AppLogic(QObject):
             w.status_label.setText("銘柄名が見つかりませんでした。")
             return
         w.set_symbol_name(row_widget, symbol_name)
-        w.status_label.setText(f"銘柄名を取得しました: {symbol_name} (Exchange={used_exchange}, URL={used_url})")                
+        w.status_label.setText(f"銘柄名を取得しました: {symbol_name} (Exchange={used_exchange}, URL={used_url})")     
     # ---------- API SETTINGS ----------
     def save_api_account(self):
         w = self.window
@@ -322,20 +375,20 @@ class AppLogic(QObject):
             w.toast("入力不足", "API設定（名前/Base URL/パスワード）は必須です。", error=True)
             return
 
-        # NOTE: ここでは “暗号化” は未実装。実運用ではOSキーチェーン or 何らかの暗号化を入れる。
-        api = ApiAccount(name=name, base_url=base_url, api_password_enc=pw, is_active=active)
+        api = ApiAccount(id=0, name=name, base_url=base_url, api_password_enc=pw, is_active=active)
 
         try:
             with self._conn() as conn:
-                # 既存の active を落としてから、最新を active にする運用（単独運用想定）
                 conn.execute("UPDATE api_accounts SET is_active=0 WHERE is_active=1;")
                 conn.execute(
                     """
                     INSERT INTO api_accounts (name, base_url, api_password_enc, is_active)
                     VALUES (?, ?, ?, ?)
                     """,
-                    (api.name, api.base_url, api.api_password_enc, 1 if api.is_active else 0)
+                    (api.name, api.base_url, api.api_password_enc, 1 if api.is_active else 0),
                 )
+            self._api_token = None
+            self._api_token_base_url = None
             w.toast("保存完了", "API設定を保存しました。")
         except Exception as e:
             w.toast("保存失敗", f"DB保存に失敗: {e}", error=True)
@@ -397,20 +450,19 @@ class AppLogic(QObject):
         run_mode = orders[0].get("run_mode") or "immediate"
         scheduled_at = orders[0].get("scheduled_at")
         scheduled_at_value = scheduled_at if run_mode == "scheduled" else None
+        initial_status = "SCHEDULED"
 
         try:
             with self._conn() as conn:
-                # batch_jobs
                 cur = conn.execute(
                     """
                     INSERT INTO batch_jobs (batch_code, api_account_id, name, status, run_mode, scheduled_at, eod_close_time, eod_force_close)
-                    VALUES (?, ?, ?, 'SCHEDULED', ?, ?, '14:30', 1)
+                    VALUES (?, ?, ?, ?, ?, ?, '14:30', 1)
                     """,
-                    (batch_code, api_account_id, batch_name, run_mode, scheduled_at_value)
+                    (batch_code, api_account_id, batch_name, initial_status, run_mode, scheduled_at_value),
                 )
                 batch_job_id = cur.lastrowid
 
-                # batch_items 一括
                 for o in orders:
                     conn.execute(
                         """
@@ -431,33 +483,450 @@ class AppLogic(QObject):
                             float(o["entry_price"]) if o["entry_type"] == "limit" else None,
                             float(o["tp_price"]),
                             float(o["sl_trigger_price"]),
-                        )
+                        ),
                     )
 
-                # event_logs
-                conn.execute(
-                    """
-                    INSERT INTO event_logs (batch_job_id, level, event_type, message)
-                    VALUES (?, 'INFO', 'BATCH_CREATED', ?)
-                    """,
-                    (batch_job_id, f"Batch created: {batch_code} / {batch_name} / items={len(orders)}")
-                )
+            self._log_event(batch_job_id, "INFO", "BATCH_CREATED", f"Batch created: {batch_code} / {batch_name} / items={len(orders)}")
 
             w.toast("送信完了", f"バッチを作成しDBに保存しました。（items={len(orders)}）")
         except Exception as e:
             w.toast("送信失敗", f"DB保存に失敗: {e}", error=True)
 
     def _get_active_api_account_id(self) -> Optional[int]:
+        api = self._get_active_api_account()
+        return api.id if api else None
+
+    # ---------- Worker loop ----------
+    def _worker_tick(self):
+        if self._worker_busy:
+            return
+        self._worker_busy = True
         try:
-            with self._conn() as conn:
-                row = conn.execute(
-                    """
-                    SELECT id FROM api_accounts
-                    WHERE is_active = 1
-                    ORDER BY id DESC
-                    LIMIT 1
-                    """
-                ).fetchone()
-            return int(row["id"]) if row else None
+            self._scheduler_step()
+            self._execution_step()
+            self._sync_orders_step()
+            self._oco_step()
+            self._eod_step()
+            self._finalize_jobs_step()
+        except Exception as e:
+            self.window.status_label.setText(f"監視ループでエラー: {e}")
+        finally:
+            self._worker_busy = False
+
+    def _scheduler_step(self):
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM batch_jobs
+                WHERE status='SCHEDULED' AND run_mode='scheduled' AND scheduled_at IS NOT NULL AND scheduled_at <= ?
+                """,
+                (now_str,),
+            ).fetchall()
+            for row in rows:
+                conn.execute("UPDATE batch_jobs SET status='RUNNING', updated_at=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
+                self._log_event(int(row["id"]), "INFO", "SCHEDULE_TRIGGERED", "予約時刻到達でRUNNINGに遷移")
+
+            immediate_rows = conn.execute(
+                "SELECT id FROM batch_jobs WHERE status='SCHEDULED' AND run_mode='immediate'"
+            ).fetchall()
+            for row in immediate_rows:
+                conn.execute("UPDATE batch_jobs SET status='RUNNING', updated_at=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
+                self._log_event(int(row["id"]), "INFO", "IMMEDIATE_TRIGGERED", "即時実行バッチを開始")
+
+    def _api_post_order(self, api: ApiAccount, payload: dict) -> str:
+        token = self._get_api_token(api)
+        if not token:
+            raise RuntimeError(self._build_last_token_error_message("APIトークン取得に失敗"))
+        base_url = self._normalize_base_url(api.base_url)
+        data = self._request_json("POST", f"{base_url}/sendorder", headers={"X-API-KEY": token}, payload=payload)
+        order_id = data.get("OrderId") or data.get("OrderID")
+        if not order_id:
+            raise RuntimeError(f"注文IDが返却されませんでした: {data}")
+        return str(order_id)
+
+    @staticmethod
+    def _side_to_kabu(side: str) -> str:
+        return "2" if side == "buy" else "1"
+
+    def _build_entry_payload(self, item: sqlite3.Row) -> dict:
+        market = item["entry_type"] == "market"
+        payload = {
+            "Symbol": item["symbol"],
+            "Exchange": int(item["exchange"]),
+            "SecurityType": 1,
+            "Side": self._side_to_kabu(item["side"]),
+            "Qty": int(item["qty"]),
+            "FrontOrderType": 10 if market else 20,
+            "Price": 0 if market else int(item["entry_price"] or 0),
+            "ExpireDay": 0,
+            "AccountType": 4,
+        }
+        if item["product"] == "cash":
+            payload.update({"CashMargin": 1, "DelivType": 2})
+        else:
+            payload.update({"CashMargin": 2, "MarginTradeType": 3, "DelivType": 0})
+        return payload
+
+    def _build_exit_payload(self, item: sqlite3.Row, order_type: str, qty: int, price: Optional[float], trigger: Optional[float], hold_id: Optional[str]) -> dict:
+        payload = {
+            "Symbol": item["symbol"],
+            "Exchange": int(item["exchange"]),
+            "SecurityType": 1,
+            "Side": self._side_to_kabu("sell" if item["side"] == "buy" else "buy"),
+            "Qty": int(qty),
+            "ExpireDay": 0,
+            "AccountType": 4,
+            "DelivType": 2,
+        }
+        if item["product"] == "cash":
+            payload["CashMargin"] = 1
+        else:
+            payload["CashMargin"] = 3
+            payload["MarginTradeType"] = 3
+            if hold_id:
+                payload["ClosePositions"] = [{"HoldID": hold_id, "Qty": int(qty)}]
+
+        if order_type == "market":
+            payload["FrontOrderType"] = 10
+            payload["Price"] = 0
+        elif order_type == "limit":
+            payload["FrontOrderType"] = 20
+            payload["Price"] = int(price or 0)
+        else:
+            payload["FrontOrderType"] = 30
+            payload["Price"] = 0
+            payload["ReverseLimitOrder"] = {
+                "TriggerSec": 1,
+                "TriggerPrice": int(trigger or 0),
+                "UnderOver": 1,
+                "AfterHitOrderType": 1,
+                "AfterHitPrice": 0,
+            }
+        return payload
+
+    def _record_order(self, conn: sqlite3.Connection, item_id: int, role: str, api_order_id: str, side: str, qty: int, order_type: str, price: Optional[float] = None, trigger_price: Optional[float] = None, hold_id: Optional[str] = None):
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO orders
+            (batch_item_id, order_role, api_order_id, side, qty, order_type, price, trigger_price, hold_id, status, raw_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'NEW', '{}', CURRENT_TIMESTAMP)
+            """,
+            (item_id, role, api_order_id, side, qty, order_type, price, trigger_price, hold_id),
+        )
+
+    def _execution_step(self):
+        api = self._get_active_api_account()
+        if not api:
+            return
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT bi.*, bj.id AS batch_job_id
+                FROM batch_items bi
+                JOIN batch_jobs bj ON bj.id = bi.batch_job_id
+                WHERE bj.status='RUNNING' AND bi.status='READY'
+                ORDER BY bi.id
+                """
+            ).fetchall()
+            for item in rows:
+                try:
+                    payload = self._build_entry_payload(item)
+                    order_id = self._api_post_order(api, payload)
+                    conn.execute(
+                        """
+                        UPDATE batch_items
+                        SET status='ENTRY_SENT', entry_order_id=?, updated_at=CURRENT_TIMESTAMP
+                        WHERE id=?
+                        """,
+                        (order_id, item["id"]),
+                    )
+                    self._record_order(conn, int(item["id"]), "entry", order_id, item["side"], int(item["qty"]), item["entry_type"], item["entry_price"])
+                    self._log_event(int(item["batch_job_id"]), "INFO", "ENTRY_SENT", f"item={item['id']} order_id={order_id}")
+                except Exception as e:
+                    conn.execute(
+                        "UPDATE batch_items SET status='ERROR', last_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (str(e), item["id"]),
+                    )
+                    self._log_event(int(item["batch_job_id"]), "ERROR", "ENTRY_FAILED", f"item={item['id']} err={e}")
+
+    def _fetch_orders_snapshot(self, api: ApiAccount) -> list[dict]:
+        token = self._get_api_token(api)
+        if not token:
+            return []
+        base_url = self._normalize_base_url(api.base_url)
+        data = self._request_json("GET", f"{base_url}/orders", headers={"X-API-KEY": token})
+        return data if isinstance(data, list) else []
+
+    def _fetch_positions_snapshot(self, api: ApiAccount) -> list[dict]:
+        token = self._get_api_token(api)
+        if not token:
+            return []
+        base_url = self._normalize_base_url(api.base_url)
+        data = self._request_json("GET", f"{base_url}/positions", headers={"X-API-KEY": token})
+        return data if isinstance(data, list) else []
+
+    @staticmethod
+    def _order_status_from_api(order: dict) -> str:
+        state = str(order.get("State") or order.get("state") or "")
+        if state in {"1", "2"}:
+            return "WORKING"
+        if state in {"3", "4"}:
+            return "PARTIAL"
+        if state in {"5"}:
+            return "FILLED"
+        if state in {"6", "7"}:
+            return "CANCELLED"
+        return "UNKNOWN"
+
+    def _sync_orders_step(self):
+        api = self._get_active_api_account()
+        if not api:
+            return
+        try:
+            snapshots = self._fetch_orders_snapshot(api)
         except Exception:
-            return None
+            return
+        by_id = {}
+        for order in snapshots:
+            oid = order.get("ID") or order.get("OrderId") or order.get("OrderID")
+            if oid:
+                by_id[str(oid)] = order
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT bi.id AS batch_item_id, bi.batch_job_id, bi.entry_order_id, bi.tp_order_id, bi.sl_order_id, bi.eod_order_id
+                FROM batch_items bi
+                JOIN batch_jobs bj ON bj.id = bi.batch_job_id
+                WHERE bj.status='RUNNING'
+                """
+            ).fetchall()
+
+            for row in rows:
+                item_id = int(row["batch_item_id"])
+                for role, key in (("entry", "entry_order_id"), ("tp", "tp_order_id"), ("sl", "sl_order_id"), ("eod", "eod_order_id")):
+                    oid = row[key]
+                    if not oid:
+                        continue
+                    api_order = by_id.get(str(oid))
+                    if not api_order:
+                        continue
+                    status = self._order_status_from_api(api_order)
+                    cum_qty = int(api_order.get("CumQty") or 0)
+                    avg_price = api_order.get("Price") or api_order.get("Details", [{}])[-1].get("RecPrice") if api_order.get("Details") else None
+                    conn.execute(
+                        """
+                        UPDATE orders
+                        SET status=?, cum_qty=?, avg_price=?, raw_json=?, last_sync_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+                        WHERE api_order_id=?
+                        """,
+                        (status, cum_qty, float(avg_price) if avg_price else None, json.dumps(api_order, ensure_ascii=False), str(oid)),
+                    )
+                    if role == "entry":
+                        new_status = "ENTRY_SENT"
+                        if status == "FILLED":
+                            new_status = "ENTRY_FILLED"
+                        elif status == "PARTIAL":
+                            new_status = "ENTRY_PARTIAL"
+                        conn.execute(
+                            """
+                            UPDATE batch_items
+                            SET status=?, entry_filled_qty=?, entry_avg_price=?, updated_at=CURRENT_TIMESTAMP
+                            WHERE id=?
+                            """,
+                            (new_status, cum_qty, float(avg_price) if avg_price else None, item_id),
+                        )
+
+            # HoldID同期（信用・ENTRY_FILLEDのみ）
+            try:
+                positions = self._fetch_positions_snapshot(api)
+            except Exception:
+                positions = []
+            for p in positions:
+                symbol = str(p.get("Symbol") or "")
+                hold_id = p.get("HoldID") or p.get("HoldId")
+                leaves_qty = int(p.get("LeavesQty") or p.get("Qty") or 0)
+                if not symbol or not hold_id or leaves_qty <= 0:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE batch_items
+                    SET hold_id=?
+                    WHERE product='margin' AND symbol=? AND status IN ('ENTRY_FILLED','BRACKET_SENT','ENTRY_PARTIAL') AND (hold_id IS NULL OR hold_id='')
+                    """,
+                    (str(hold_id), symbol),
+                )
+
+    def _oco_step(self):
+        api = self._get_active_api_account()
+        if not api:
+            return
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT bi.*, bj.id AS batch_job_id
+                FROM batch_items bi
+                JOIN batch_jobs bj ON bj.id = bi.batch_job_id
+                WHERE bj.status='RUNNING'
+                  AND bi.status='ENTRY_FILLED'
+                  AND bi.tp_order_id IS NULL
+                  AND bi.sl_order_id IS NULL
+                """
+            ).fetchall()
+
+            for item in rows:
+                if item["product"] == "margin" and not item["hold_id"]:
+                    continue
+                qty = int(item["entry_filled_qty"] or item["qty"])
+                if qty <= 0:
+                    continue
+                avg = float(item["entry_avg_price"] or item["entry_price"] or 0)
+                if avg <= 0:
+                    continue
+                tp_abs = avg + float(item["tp_price"])
+                sl_abs = avg + float(item["sl_trigger_price"])
+                try:
+                    tp_payload = self._build_exit_payload(item, "limit", qty, tp_abs, None, item["hold_id"])
+                    tp_order_id = self._api_post_order(api, tp_payload)
+                    sl_payload = self._build_exit_payload(item, "stop", qty, None, sl_abs, item["hold_id"])
+                    sl_order_id = self._api_post_order(api, sl_payload)
+
+                    conn.execute(
+                        """
+                        UPDATE batch_items
+                        SET status='BRACKET_SENT', tp_order_id=?, sl_order_id=?, updated_at=CURRENT_TIMESTAMP
+                        WHERE id=?
+                        """,
+                        (tp_order_id, sl_order_id, item["id"]),
+                    )
+                    close_side = "sell" if item["side"] == "buy" else "buy"
+                    self._record_order(conn, int(item["id"]), "tp", tp_order_id, close_side, qty, "limit", tp_abs, None, item["hold_id"])
+                    self._record_order(conn, int(item["id"]), "sl", sl_order_id, close_side, qty, "stop", None, sl_abs, item["hold_id"])
+                    self._log_event(int(item["batch_job_id"]), "INFO", "OCO_SENT", f"item={item['id']} tp={tp_order_id} sl={sl_order_id}")
+                except Exception as e:
+                    conn.execute(
+                        "UPDATE batch_items SET status='ERROR', last_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (str(e), item["id"]),
+                    )
+                    self._log_event(int(item["batch_job_id"]), "ERROR", "OCO_FAILED", f"item={item['id']} err={e}")
+
+            close_rows = conn.execute(
+                """
+                SELECT bi.id, bi.batch_job_id, bi.tp_order_id, bi.sl_order_id,
+                       otp.status AS tp_status, otp.cum_qty AS tp_cum,
+                       osl.status AS sl_status, osl.cum_qty AS sl_cum
+                FROM batch_items bi
+                JOIN batch_jobs bj ON bj.id=bi.batch_job_id
+                LEFT JOIN orders otp ON otp.api_order_id = bi.tp_order_id
+                LEFT JOIN orders osl ON osl.api_order_id = bi.sl_order_id
+                WHERE bj.status='RUNNING' AND bi.status='BRACKET_SENT'
+                """
+            ).fetchall()
+
+            for row in close_rows:
+                item_id = int(row["id"])
+                if row["tp_status"] == "FILLED":
+                    self._cancel_order_if_needed(api, row["sl_order_id"])
+                    conn.execute(
+                        "UPDATE batch_items SET status='CLOSED', closed_qty=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (int(row["tp_cum"] or 0), item_id),
+                    )
+                    self._log_event(int(row["batch_job_id"]), "INFO", "TP_FILLED", f"item={item_id}")
+                elif row["sl_status"] == "FILLED":
+                    self._cancel_order_if_needed(api, row["tp_order_id"])
+                    conn.execute(
+                        "UPDATE batch_items SET status='CLOSED', closed_qty=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (int(row["sl_cum"] or 0), item_id),
+                    )
+                    self._log_event(int(row["batch_job_id"]), "INFO", "SL_FILLED", f"item={item_id}")
+
+    def _cancel_order_if_needed(self, api: ApiAccount, api_order_id: Optional[str]) -> None:
+        if not api_order_id:
+            return
+        token = self._get_api_token(api)
+        if not token:
+            return
+        base_url = self._normalize_base_url(api.base_url)
+        try:
+            self._request_json("PUT", f"{base_url}/cancelorder", headers={"X-API-KEY": token}, payload={"OrderID": api_order_id})
+        except Exception:
+            return
+
+    def _eod_step(self):
+        now = datetime.now()
+        if now.strftime("%H:%M") < "14:30":
+            return
+        api = self._get_active_api_account()
+        if not api:
+            return
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT bi.*, bj.id AS batch_job_id, bj.eod_force_close
+                FROM batch_items bi
+                JOIN batch_jobs bj ON bj.id=bi.batch_job_id
+                WHERE bj.status='RUNNING'
+                  AND bj.eod_force_close=1
+                  AND bi.status IN ('ENTRY_PARTIAL','ENTRY_FILLED','BRACKET_SENT')
+                """
+            ).fetchall()
+            for item in rows:
+                try:
+                    self._cancel_order_if_needed(api, item["tp_order_id"])
+                    self._cancel_order_if_needed(api, item["sl_order_id"])
+                    remaining = max(int(item["entry_filled_qty"] or 0) - int(item["closed_qty"] or 0), 0)
+                    if remaining <= 0:
+                        conn.execute("UPDATE batch_items SET status='CLOSED', updated_at=CURRENT_TIMESTAMP WHERE id=?", (item["id"],))
+                        continue
+                    if item["product"] == "margin" and not item["hold_id"]:
+                        continue
+                    payload = self._build_exit_payload(item, "market", remaining, None, None, item["hold_id"])
+                    eod_order_id = self._api_post_order(api, payload)
+                    close_side = "sell" if item["side"] == "buy" else "buy"
+                    self._record_order(conn, int(item["id"]), "eod", eod_order_id, close_side, remaining, "market", None, None, item["hold_id"])
+                    conn.execute(
+                        """
+                        UPDATE batch_items
+                        SET eod_order_id=?, status='EOD_MARKET_SENT', updated_at=CURRENT_TIMESTAMP
+                        WHERE id=?
+                        """,
+                        (eod_order_id, item["id"]),
+                    )
+                    self._log_event(int(item["batch_job_id"]), "WARN", "EOD_FORCE_CLOSE", f"item={item['id']} eod_order_id={eod_order_id}")
+                except Exception as e:
+                    conn.execute("UPDATE batch_items SET status='ERROR', last_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (str(e), item["id"]))
+                    self._log_event(int(item["batch_job_id"]), "ERROR", "EOD_FAILED", f"item={item['id']} err={e}")
+
+            # EOD注文の完了反映
+            done_rows = conn.execute(
+                """
+                SELECT bi.id, bi.batch_job_id, bi.eod_order_id, oeod.status
+                FROM batch_items bi
+                LEFT JOIN orders oeod ON oeod.api_order_id = bi.eod_order_id
+                WHERE bi.status='EOD_MARKET_SENT'
+                """
+            ).fetchall()
+            for row in done_rows:
+                if row["status"] == "FILLED":
+                    conn.execute("UPDATE batch_items SET status='CLOSED', updated_at=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
+                    self._log_event(int(row["batch_job_id"]), "INFO", "EOD_FILLED", f"item={row['id']}")
+
+    def _finalize_jobs_step(self):
+        with self._conn() as conn:
+            jobs = conn.execute("SELECT id FROM batch_jobs WHERE status='RUNNING'").fetchall()
+            for job in jobs:
+                counts = conn.execute(
+                    "SELECT status, COUNT(*) AS c FROM batch_items WHERE batch_job_id=? GROUP BY status",
+                    (job["id"],),
+                ).fetchall()
+                by_status = {row["status"]: int(row["c"]) for row in counts}
+                total = sum(by_status.values())
+                closed = by_status.get("CLOSED", 0)
+                errors = by_status.get("ERROR", 0)
+                if total > 0 and closed == total:
+                    conn.execute("UPDATE batch_jobs SET status='DONE', updated_at=CURRENT_TIMESTAMP WHERE id=?", (job["id"],))
+                    self._log_event(int(job["id"]), "INFO", "BATCH_DONE", "全銘柄が決済完了")
+                elif errors > 0:
+                    conn.execute("UPDATE batch_jobs SET status='ERROR', updated_at=CURRENT_TIMESTAMP WHERE id=?", (job["id"],))
+                    self._log_event(int(job["id"]), "ERROR", "BATCH_ERROR", f"error_items={errors}")
