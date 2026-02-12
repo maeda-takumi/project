@@ -235,6 +235,7 @@ class AppLogic(QObject):
 
     def fetch_symbol_name(self, symbol: str, row_widget):
         w = self.window
+        symbol = symbol.strip()
         api = self._get_active_api_account()
         if not api:
             w.set_symbol_name(row_widget, "API未設定")
@@ -248,18 +249,43 @@ class AppLogic(QObject):
             return
 
         base_url = self._normalize_base_url(api.base_url)
-        query = urllib.parse.urlencode({"Exchange": 9})
-        url = f"{base_url}/symbol/{symbol}?{query}"
+        exchange_candidates = (1, 3, 5, 6)
+
+        def request_symbol_with_token(current_token: str):
+            last_error: Optional[Exception] = None
+            for exchange in exchange_candidates:
+                candidate_urls = (
+                    f"{base_url}/symbol/{symbol}@{exchange}",
+                    f"{base_url}/symbol/{symbol}?{urllib.parse.urlencode({'Exchange': exchange})}",
+                )
+                for candidate_url in candidate_urls:
+                    try:
+                        data = self._request_json("GET", candidate_url, headers={"X-API-KEY": current_token})
+                        if data.get("SymbolName") or data.get("DisplayName"):
+                            return data
+                    except urllib.error.HTTPError as e:
+                        last_error = e
+                        # 401はトークン再取得対象、400/404は別市場コードを試す
+                        if e.code == 401:
+                            raise
+                        continue
+                    except Exception as e:
+                        last_error = e
+                        continue
+            if last_error:
+                raise last_error
+            raise RuntimeError("銘柄情報取得に失敗しました。")
+
 
         try:
-            data = self._request_json("GET", url, headers={"X-API-KEY": token})
+            data = request_symbol_with_token(token)
         except urllib.error.HTTPError as e:
             if e.code == 401:
                 self._api_token = None
                 token = self._get_api_token(api)
                 if token:
                     try:
-                        data = self._request_json("GET", url, headers={"X-API-KEY": token})
+                        data = request_symbol_with_token(token)
                     except Exception as retry_error:
                         w.set_symbol_name(row_widget, "取得失敗")
                         w.status_label.setText(self._build_api_error_message("銘柄名の取得に失敗しました。", retry_error))
