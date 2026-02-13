@@ -552,6 +552,8 @@ class AppLogic(QObject):
             self._cancel_order_if_needed(api, item["tp_order_id"])
             self._cancel_order_if_needed(api, item["sl_order_id"])
             payload = self._build_exit_payload(item, "market", remaining, None, None, item["hold_id"])
+            with self._conn() as conn:
+                self._log_payload_debug(int(item["batch_job_id"]), "MANUAL_CLOSE_PAYLOAD", payload, conn)
             order_id = self._api_post_order(api, payload)
         except Exception as e:
             with self._conn() as conn:
@@ -744,11 +746,15 @@ class AppLogic(QObject):
             tp_status = self._render_order_status(row["tp_order_status"], fallback_waiting="WAITING")
             sl_status = self._render_order_status(row["sl_order_status"], fallback_waiting="WAITING")
 
-            if item_status in {"READY", "ENTRY_SENT", "ENTRY_PARTIAL", "ENTRY_FILLED"}:
+            if item_status in {"READY", "ENTRY_SENT", "ENTRY_PARTIAL", "ENTRY_FILLED", "ENTRY_FILLED_WAIT_PRICE"}:
                 if item_status == "READY":
                     entry_status = "READY"
-                tp_status = "WAITING"
-                sl_status = "WAITING"
+                if item_status == "ENTRY_FILLED_WAIT_PRICE":
+                    tp_status = "WAIT_PRICE"
+                    sl_status = "WAIT_PRICE"
+                else:
+                    tp_status = "WAITING"
+                    sl_status = "WAITING"
 
             if item_status == "BRACKET_SENT":
                 tp_status = self._render_order_status(row["tp_order_status"], fallback_waiting="NEW")
@@ -771,7 +777,7 @@ class AppLogic(QObject):
                 "entry_fill_amount_text": _fmt_amount(row["entry_avg_price"], row["entry_cum_qty"]),
                 "tp_fill_amount_text": _fmt_amount(row["tp_avg_price"], row["tp_cum_qty"]),
                 "sl_fill_amount_text": _fmt_amount(row["sl_avg_price"], row["sl_cum_qty"]),
-                "can_manual_close": item_status in {"ENTRY_PARTIAL", "ENTRY_FILLED", "BRACKET_SENT", "EOD_MARKET_SENT"},
+                "can_manual_close": item_status in {"ENTRY_PARTIAL", "ENTRY_FILLED", "ENTRY_FILLED_WAIT_PRICE", "BRACKET_SENT", "EOD_MARKET_SENT"},
                 "last_error": row["last_error"] or "",
             })
 
@@ -875,13 +881,14 @@ class AppLogic(QObject):
             "Qty": int(qty),
             "ExpireDay": 0,
             "AccountType": 4,
-            "DelivType": 2,
         }
         if item["product"] == "cash":
             payload["CashMargin"] = 1
+            payload["DelivType"] = 2
         else:
             payload["CashMargin"] = 3
             payload["MarginTradeType"] = 3
+            payload["DelivType"] = 0
             if hold_id:
                 payload["ClosePositions"] = [{"HoldID": hold_id, "Qty": int(qty)}]
 
@@ -902,6 +909,59 @@ class AppLogic(QObject):
                 "AfterHitPrice": 0,
             }
         return payload
+    @staticmethod
+    def _to_positive_float(value: object) -> Optional[float]:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    def _extract_order_avg_price(self, order: dict) -> Optional[float]:
+        primary = self._to_positive_float(order.get("Price"))
+        if primary:
+            return primary
+
+        details = order.get("Details")
+        if not isinstance(details, list):
+            return None
+
+        weighted_price = 0.0
+        weighted_qty = 0
+        fallback = None
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            price = None
+            for key in ("RecPrice", "ExecutionPrice", "Price"):
+                price = self._to_positive_float(detail.get(key))
+                if price:
+                    break
+            if not price:
+                continue
+            fallback = price
+            qty = detail.get("RecQty") or detail.get("ExecutionQty") or detail.get("Qty")
+            try:
+                qty_int = int(qty)
+            except (TypeError, ValueError):
+                qty_int = 0
+            if qty_int > 0:
+                weighted_price += price * qty_int
+                weighted_qty += qty_int
+
+        if weighted_qty > 0:
+            return weighted_price / weighted_qty
+        return fallback
+
+    def _log_payload_debug(self, batch_job_id: int, event_type: str, payload: dict, conn: sqlite3.Connection) -> None:
+        details = {
+            "Symbol": payload.get("Symbol"),
+            "Exchange": payload.get("Exchange"),
+            "CashMargin": payload.get("CashMargin"),
+            "DelivType": payload.get("DelivType"),
+            "FrontOrderType": payload.get("FrontOrderType"),
+        }
+        self._log_event(batch_job_id, "DEBUG", event_type, json.dumps(details, ensure_ascii=False), conn=conn)
 
     def _record_order(self, conn: sqlite3.Connection, item_id: int, role: str, api_order_id: str, side: str, qty: int, order_type: str, price: Optional[float] = None, trigger_price: Optional[float] = None, hold_id: Optional[str] = None):
         conn.execute(
@@ -930,6 +990,8 @@ class AppLogic(QObject):
         for item in rows:
             try:
                 payload = self._build_entry_payload(item)
+                with self._conn() as conn:
+                    self._log_payload_debug(int(item["batch_job_id"]), "ENTRY_PAYLOAD", payload, conn)
                 order_id = self._api_post_order(api, payload)
             except Exception as e:
                 with self._conn() as conn:
@@ -1033,28 +1095,36 @@ class AppLogic(QObject):
                         continue
                     status = self._order_status_from_api(api_order)
                     cum_qty = int(api_order.get("CumQty") or 0)
-                    avg_price = api_order.get("Price") or api_order.get("Details", [{}])[-1].get("RecPrice") if api_order.get("Details") else None
+                    avg_price = self._extract_order_avg_price(api_order)
                     conn.execute(
                         """
                         UPDATE orders
                         SET status=?, cum_qty=?, avg_price=?, raw_json=?, last_sync_at=datetime('now','+9 hours'), updated_at=datetime('now','+9 hours')
                         WHERE api_order_id=?
                         """,
-                        (status, cum_qty, float(avg_price) if avg_price else None, json.dumps(api_order, ensure_ascii=False), str(oid)),
+                        (status, cum_qty, float(avg_price) if avg_price is not None else None, json.dumps(api_order, ensure_ascii=False), str(oid)),
                     )
                     if role == "entry":
                         new_status = "ENTRY_SENT"
                         if status == "FILLED":
-                            new_status = "ENTRY_FILLED"
+                            new_status = "ENTRY_FILLED" if avg_price else "ENTRY_FILLED_WAIT_PRICE"
                         elif status == "PARTIAL":
                             new_status = "ENTRY_PARTIAL"
+                        if status == "FILLED" and not avg_price:
+                            self._log_event(
+                                int(row["batch_job_id"]),
+                                "WARN",
+                                "ENTRY_PRICE_UNAVAILABLE",
+                                f"item={item_id} order_id={oid}",
+                                conn=conn,
+                            )
                         conn.execute(
                             """
                             UPDATE batch_items
                             SET status=?, entry_filled_qty=?, entry_avg_price=?, updated_at=datetime('now','+9 hours')
                             WHERE id=?
                             """,
-                            (new_status, cum_qty, float(avg_price) if avg_price else None, item_id),
+                            (new_status, cum_qty, float(avg_price) if avg_price is not None else None, item_id),
                         )
 
             for p in positions:
@@ -1084,7 +1154,7 @@ class AppLogic(QObject):
                 FROM batch_items bi
                 JOIN batch_jobs bj ON bj.id = bi.batch_job_id
                 WHERE bj.status='RUNNING'
-                  AND bi.status='ENTRY_FILLED'
+                  AND bi.status IN ('ENTRY_FILLED','ENTRY_FILLED_WAIT_PRICE')
                   AND bi.tp_order_id IS NULL
                   AND bi.sl_order_id IS NULL
                 """
@@ -1098,13 +1168,29 @@ class AppLogic(QObject):
                 continue
             avg = float(item["entry_avg_price"] or item["entry_price"] or 0)
             if avg <= 0:
+                with self._conn() as conn:
+                    conn.execute(
+                        "UPDATE batch_items SET status='ENTRY_FILLED_WAIT_PRICE', last_error=?, updated_at=datetime('now','+9 hours') WHERE id=?",
+                        ("約定価格の取得待ちのため利確/損切を保留中", item["id"]),
+                    )
+                    self._log_event(
+                        int(item["batch_job_id"]),
+                        "WARN",
+                        "OCO_WAIT_PRICE",
+                        f"item={item['id']}",
+                        conn=conn,
+                    )
                 continue
             tp_abs = avg + float(item["tp_price"])
             sl_abs = avg + float(item["sl_trigger_price"])
             try:
                 tp_payload = self._build_exit_payload(item, "limit", qty, tp_abs, None, item["hold_id"])
+                with self._conn() as conn:
+                    self._log_payload_debug(int(item["batch_job_id"]), "TP_PAYLOAD", tp_payload, conn)
                 tp_order_id = self._api_post_order(api, tp_payload)
                 sl_payload = self._build_exit_payload(item, "stop", qty, None, sl_abs, item["hold_id"])
+                with self._conn() as conn:
+                    self._log_payload_debug(int(item["batch_job_id"]), "SL_PAYLOAD", sl_payload, conn)
                 sl_order_id = self._api_post_order(api, sl_payload)
             except Exception as e:
                 with self._conn() as conn:
@@ -1218,6 +1304,8 @@ class AppLogic(QObject):
                 if item["product"] == "margin" and not item["hold_id"]:
                     continue
                 payload = self._build_exit_payload(item, "market", remaining, None, None, item["hold_id"])
+                with self._conn() as conn:
+                    self._log_payload_debug(int(item["batch_job_id"]), "EOD_PAYLOAD", payload, conn)
                 eod_order_id = self._api_post_order(api, payload)
             except Exception as e:
                 with self._conn() as conn:
