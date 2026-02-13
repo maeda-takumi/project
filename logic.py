@@ -825,6 +825,7 @@ class AppLogic(QObject):
             data = self._request_json("POST", f"{base_url}/sendorder", headers={"X-API-KEY": token}, payload=payload)
         except urllib.error.HTTPError as e:
             body = self._read_http_error_body(e)
+            payload_ctx = self._payload_error_context(payload)
             err_payload = self._parse_error_json(body)
             err_code = (err_payload or {}).get("Code") or (err_payload or {}).get("code")
             current_exchange = payload.get("Exchange")
@@ -838,11 +839,11 @@ class AppLogic(QObject):
                     except urllib.error.HTTPError as retry_error:
                         retry_body = self._read_http_error_body(retry_error)
                         if retry_exchange == 27:
-                            raise RuntimeError(self._build_http_error_with_body("発注API呼び出しに失敗", retry_error, retry_body)) from retry_error
+                            raise RuntimeError(f"{self._build_http_error_with_body('発注API呼び出しに失敗', retry_error, retry_body)} / payload={payload_ctx}") from retry_error
                 else:
-                    raise RuntimeError(self._build_http_error_with_body("発注API呼び出しに失敗", e, body)) from e
+                    raise RuntimeError(f"{self._build_http_error_with_body('発注API呼び出しに失敗', e, body)} / payload={payload_ctx}") from e
             else:
-                raise RuntimeError(self._build_http_error_with_body("発注API呼び出しに失敗", e, body)) from e
+                raise RuntimeError(f"{self._build_http_error_with_body('発注API呼び出しに失敗', e, body)} / payload={payload_ctx}") from e
         order_id = data.get("OrderId") or data.get("OrderID")
         if not order_id:
             raise RuntimeError(f"注文IDが返却されませんでした: {data}")
@@ -873,18 +874,22 @@ class AppLogic(QObject):
         return payload
 
     def _build_exit_payload(self, item: sqlite3.Row, order_type: str, qty: int, price: Optional[float], trigger: Optional[float], hold_id: Optional[str]) -> dict:
+        close_side = "sell" if item["side"] == "buy" else "buy"
         payload = {
             "Symbol": item["symbol"],
             "Exchange": self._normalize_exchange(item["exchange"]),
             "SecurityType": 1,
-            "Side": self._side_to_kabu("sell" if item["side"] == "buy" else "buy"),
+            "Side": self._side_to_kabu(close_side),
             "Qty": int(qty),
             "ExpireDay": 0,
             "AccountType": 4,
         }
         if item["product"] == "cash":
             payload["CashMargin"] = 1
-            payload["DelivType"] = 2
+            # 現物決済では売買方向に応じて受渡区分を切り替える
+            # 買い建玉の決済（売り）は DelivType=0、売り建玉の決済（買い）は DelivType=2
+            payload["DelivType"] = 0 if close_side == "sell" else 2
+            payload["FundType"] = "AA"
         else:
             payload["CashMargin"] = 3
             payload["MarginTradeType"] = 3
@@ -909,6 +914,23 @@ class AppLogic(QObject):
                 "AfterHitPrice": 0,
             }
         return payload
+    @staticmethod
+    def _payload_error_context(payload: dict) -> str:
+        context = {
+            "Symbol": payload.get("Symbol"),
+            "Exchange": payload.get("Exchange"),
+            "Side": payload.get("Side"),
+            "Qty": payload.get("Qty"),
+            "CashMargin": payload.get("CashMargin"),
+            "DelivType": payload.get("DelivType"),
+            "FundType": payload.get("FundType"),
+            "MarginTradeType": payload.get("MarginTradeType"),
+            "FrontOrderType": payload.get("FrontOrderType"),
+            "Price": payload.get("Price"),
+            "TriggerPrice": (payload.get("ReverseLimitOrder") or {}).get("TriggerPrice"),
+        }
+        return json.dumps(context, ensure_ascii=False)
+    
     @staticmethod
     def _to_positive_float(value: object) -> Optional[float]:
         try:
@@ -957,9 +979,17 @@ class AppLogic(QObject):
         details = {
             "Symbol": payload.get("Symbol"),
             "Exchange": payload.get("Exchange"),
+            "Side": payload.get("Side"),
+            "Qty": payload.get("Qty"),
             "CashMargin": payload.get("CashMargin"),
             "DelivType": payload.get("DelivType"),
+            "FundType": payload.get("FundType"),
+            "MarginTradeType": payload.get("MarginTradeType"),
             "FrontOrderType": payload.get("FrontOrderType"),
+            "Price": payload.get("Price"),
+            "TriggerPrice": (payload.get("ReverseLimitOrder") or {}).get("TriggerPrice"),
+            "AccountType": payload.get("AccountType"),
+            "ReverseLimitOrder": payload.get("ReverseLimitOrder"),
         }
         self._log_event(batch_job_id, "DEBUG", event_type, json.dumps(details, ensure_ascii=False), conn=conn)
 
