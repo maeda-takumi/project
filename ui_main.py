@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QStackedWidget,
 
 from style import APP_QSS
 from ui.pages.settings_page import SettingsPage
+from ui.pages.status_page import StatusPage
 from ui.pages.trade_order_page import TradeOrderPage
 
 # DEFAULT_EXCHANGE_CODE = 27
@@ -40,6 +41,7 @@ class MainWindow(QMainWindow):
 
         self.page_settings = SettingsPage()
         self.page_trading = TradeOrderPage(self.request_symbol_lookup)
+        self.page_status = StatusPage()
 
         self.pages.addWidget(self.page_settings)
         self.pages.addWidget(self.page_trading)
@@ -67,6 +69,7 @@ class MainWindow(QMainWindow):
         nav_defs = [
             ("設定", "img/option.png", 0),
             ("取引注文", "img/kabu.png", 1),
+            ("実行状況確認", "img/kabu.png", 2),
         ]
 
         self.nav_buttons: list[tuple[int, QToolButton]] = []
@@ -138,7 +141,7 @@ class MainWindow(QMainWindow):
         self.page_trading.set_execution_status(target, entry, tp, sl)
 
     def set_open_order_cards(self, items: list[dict]):
-        # 取引注文画面では状況確認カードを表示しないため no-op
+        self.page_status.set_cards(items)
         _ = items
         
     def toast(self, title: str, message: str, error: bool = False):
