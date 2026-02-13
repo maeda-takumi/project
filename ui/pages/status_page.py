@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QHBoxLayout, QScrollArea, QGridLayout
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QHBoxLayout, QScrollArea, QGridLayout, QPushButton
 
 from ui.widgets.status_badge import map_status_to_badge
 class StatusPage(QWidget):
+    manual_close_requested = Signal(int)
     def __init__(self):
         super().__init__()
 
@@ -93,6 +94,16 @@ class StatusPage(QWidget):
         v.addLayout(status_grid)
 
         v.addWidget(QLabel(f"約定数量: {data.get('entry_filled_qty', 0)} | クローズ数量: {data.get('closed_qty', 0)}"))
+        v.addWidget(QLabel(f"注文時刻: 新規 {data.get('entry_sent_at', '-')} / 利確 {data.get('tp_sent_at', '-')} / 損切 {data.get('sl_sent_at', '-')}"))
+        v.addWidget(QLabel(f"約定金額: 新規 {data.get('entry_fill_amount_text', '-')} / 利確 {data.get('tp_fill_amount_text', '-')} / 損切 {data.get('sl_fill_amount_text', '-')}"))
+
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        btn_market_close = QPushButton("成行決済")
+        btn_market_close.setEnabled(bool(data.get("can_manual_close", False)))
+        btn_market_close.clicked.connect(lambda _=False, item_id=int(data.get("id", 0)): self.manual_close_requested.emit(item_id))
+        action_row.addWidget(btn_market_close)
+        v.addLayout(action_row)
 
         last_error = (data.get("last_error") or "").strip()
         if last_error:

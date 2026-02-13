@@ -53,6 +53,7 @@ class AppLogic(QObject):
 
         w.request_clear_orders.connect(self.clear_orders)
         w.request_submit_orders.connect(self.submit_orders_to_db)
+        w.request_manual_close.connect(self.manual_close_item)
 
         self._worker_timer = QTimer(self)
         self._worker_timer.timeout.connect(self._worker_tick)
@@ -515,6 +516,66 @@ class AppLogic(QObject):
         self.window.clear_orders()
         self.window.toast("クリア", "注文内容をクリアしました。")
 
+    def manual_close_item(self, item_id: int):
+        api = self._get_active_api_account()
+        if not api:
+            self.window.toast("成行決済失敗", "API設定が未登録です。", error=True)
+            return
+
+        with self._conn() as conn:
+            item = conn.execute(
+                """
+                SELECT bi.*
+                FROM batch_items bi
+                JOIN batch_jobs bj ON bj.id = bi.batch_job_id
+                WHERE bi.id=?
+                """,
+                (int(item_id),),
+            ).fetchone()
+
+        if not item:
+            self.window.toast("成行決済失敗", f"対象注文が見つかりません: id={item_id}", error=True)
+            return
+        if str(item["status"] or "") == "CLOSED":
+            self.window.toast("成行決済", f"既に決済済みです: id={item_id}")
+            return
+        if item["product"] == "margin" and not item["hold_id"]:
+            self.window.toast("成行決済失敗", "信用建玉のHoldIDが未取得です。", error=True)
+            return
+
+        remaining = max(int(item["entry_filled_qty"] or 0) - int(item["closed_qty"] or 0), 0)
+        if remaining <= 0:
+            self.window.toast("成行決済", f"残数量がありません: id={item_id}")
+            return
+
+        try:
+            self._cancel_order_if_needed(api, item["tp_order_id"])
+            self._cancel_order_if_needed(api, item["sl_order_id"])
+            payload = self._build_exit_payload(item, "market", remaining, None, None, item["hold_id"])
+            order_id = self._api_post_order(api, payload)
+        except Exception as e:
+            with self._conn() as conn:
+                conn.execute(
+                    "UPDATE batch_items SET status='ERROR', last_error=?, updated_at=datetime('now','+9 hours') WHERE id=?",
+                    (f"manual_close: {e}", int(item_id)),
+                )
+            self.window.toast("成行決済失敗", str(e), error=True)
+            return
+
+        close_side = "sell" if item["side"] == "buy" else "buy"
+        with self._conn() as conn:
+            self._record_order(conn, int(item_id), "manual", order_id, close_side, remaining, "market", None, None, item["hold_id"])
+            conn.execute(
+                """
+                UPDATE batch_items
+                SET eod_order_id=?, status='EOD_MARKET_SENT', updated_at=datetime('now','+9 hours')
+                WHERE id=?
+                """,
+                (order_id, int(item_id)),
+            )
+            self._log_event(int(item["batch_job_id"]), "INFO", "MANUAL_MARKET_CLOSE", f"item={item_id} order_id={order_id}", conn=conn)
+
+        self.window.toast("成行決済", f"成行決済を送信しました: id={item_id}")
     # ---------- SUBMIT ORDERS ----------
     def submit_orders_to_db(self):
         w = self.window
@@ -638,8 +699,17 @@ class AppLogic(QObject):
                        bi.entry_filled_qty,
                        bi.closed_qty,
                        oe.status AS entry_order_status,
+                       oe.sent_at AS entry_sent_at,
+                       oe.avg_price AS entry_avg_price,
+                       oe.cum_qty AS entry_cum_qty,
                        otp.status AS tp_order_status,
-                       osl.status AS sl_order_status
+                       otp.sent_at AS tp_sent_at,
+                       otp.avg_price AS tp_avg_price,
+                       otp.cum_qty AS tp_cum_qty,
+                       osl.status AS sl_order_status,
+                       osl.sent_at AS sl_sent_at,
+                       osl.avg_price AS sl_avg_price,
+                       osl.cum_qty AS sl_cum_qty
                 FROM batch_items bi
                 JOIN batch_jobs bj ON bj.id = bi.batch_job_id
                 LEFT JOIN orders oe ON oe.api_order_id = bi.entry_order_id
@@ -657,6 +727,17 @@ class AppLogic(QObject):
             return
 
         cards: list[dict] = []
+        def _fmt_sent_at(value: object) -> str:
+            return str(value) if value else "-"
+
+        def _fmt_amount(avg: object, qty: object) -> str:
+            if avg is None or not qty:
+                return "-"
+            try:
+                amount = float(avg) * int(qty)
+            except Exception:
+                return "-"
+            return f"{amount:,.0f}円"
         for row in rows:
             item_status = str(row["item_status"] or "")
             entry_status = self._render_order_status(row["entry_order_status"], fallback_waiting="UNSENT")
@@ -684,6 +765,13 @@ class AppLogic(QObject):
                 "sl_status_label": sl_status,
                 "entry_filled_qty": int(row["entry_filled_qty"] or 0),
                 "closed_qty": int(row["closed_qty"] or 0),
+                "entry_sent_at": _fmt_sent_at(row["entry_sent_at"]),
+                "tp_sent_at": _fmt_sent_at(row["tp_sent_at"]),
+                "sl_sent_at": _fmt_sent_at(row["sl_sent_at"]),
+                "entry_fill_amount_text": _fmt_amount(row["entry_avg_price"], row["entry_cum_qty"]),
+                "tp_fill_amount_text": _fmt_amount(row["tp_avg_price"], row["tp_cum_qty"]),
+                "sl_fill_amount_text": _fmt_amount(row["sl_avg_price"], row["sl_cum_qty"]),
+                "can_manual_close": item_status in {"ENTRY_PARTIAL", "ENTRY_FILLED", "BRACKET_SENT", "EOD_MARKET_SENT"},
                 "last_error": row["last_error"] or "",
             })
 
