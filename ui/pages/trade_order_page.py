@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.widgets.order_row_widget import OrderRowWidget
+from ui.widgets.status_badge import map_status_to_badge
 
 DEFAULT_EXCHANGE_CODE = 27
 

@@ -617,17 +617,12 @@ class AppLogic(QObject):
             self._worker_busy = False
 
     @staticmethod
-    def _render_order_status(status: Optional[str], fallback_waiting: str = "待機中") -> str:
+    def _render_order_status(status: Optional[str], fallback_waiting: str = "WAITING") -> str:
         if not status:
             return fallback_waiting
-        mapping = {
-            "NEW": "発注済",
-            "WORKING": "約定待ち",
-            "PARTIAL": "一部約定",
-            "FILLED": "約定済",
-            "CANCELLED": "取消済",
-            "UNKNOWN": "確認中",
-        }
+        normalized = str(status).strip().upper()
+        known = {"NEW", "WORKING", "PARTIAL", "FILLED", "CANCELLED", "ERROR", "UNKNOWN", "WAITING"}
+        return normalized if normalized in known else "UNKNOWN"
         return mapping.get(status, status)
 
     def _refresh_execution_status_ui(self) -> None:
@@ -657,26 +652,26 @@ class AppLogic(QObject):
             ).fetchall()
 
         if not rows:
-            self.window.set_execution_status("監視対象なし", "待機中", "待機中", "待機中")
+            self.window.set_execution_status("監視対象なし", "WAITING", "WAITING", "WAITING")
             self.window.set_open_order_cards([])
             return
 
         cards: list[dict] = []
         for row in rows:
             item_status = str(row["item_status"] or "")
-            entry_status = self._render_order_status(row["entry_order_status"], fallback_waiting="未送信")
-            tp_status = self._render_order_status(row["tp_order_status"])
-            sl_status = self._render_order_status(row["sl_order_status"])
+            entry_status = self._render_order_status(row["entry_order_status"], fallback_waiting="UNSENT")
+            tp_status = self._render_order_status(row["tp_order_status"], fallback_waiting="WAITING")
+            sl_status = self._render_order_status(row["sl_order_status"], fallback_waiting="WAITING")
 
             if item_status in {"READY", "ENTRY_SENT", "ENTRY_PARTIAL", "ENTRY_FILLED"}:
                 if item_status == "READY":
-                    entry_status = "送信待ち"
-                tp_status = "待機中"
-                sl_status = "待機中"
+                    entry_status = "READY"
+                tp_status = "WAITING"
+                sl_status = "WAITING"
 
             if item_status == "BRACKET_SENT":
-                tp_status = self._render_order_status(row["tp_order_status"], fallback_waiting="発注済")
-                sl_status = self._render_order_status(row["sl_order_status"], fallback_waiting="発注済")
+                tp_status = self._render_order_status(row["tp_order_status"], fallback_waiting="NEW")
+                sl_status = self._render_order_status(row["sl_order_status"], fallback_waiting="NEW")
 
             cards.append({
                 "id": row["id"],
@@ -695,8 +690,7 @@ class AppLogic(QObject):
         latest = rows[0]
         target = f"#{latest['id']} {latest['symbol']}"
         if str(latest["item_status"] or "") == "ERROR":
-            err = (latest["last_error"] or "エラー").splitlines()[0]
-            self.window.set_execution_status(target, f"エラー: {err}", "-", "-")
+            self.window.set_execution_status(target, "ERROR", "-", "-")
         else:
             self.window.set_execution_status(
                 target,
